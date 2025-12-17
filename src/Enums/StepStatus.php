@@ -1,0 +1,12 @@
+<?php
+
+namespace Smartpricing\TraceFlow\Enums;
+
+enum StepStatus: string
+{
+    case STARTED = 'STARTED';
+    case IN_PROGRESS = 'IN_PROGRESS';
+    case COMPLETED = 'COMPLETED';
+    case FAILED = 'FAILED';
+}
+

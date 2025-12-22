@@ -7,7 +7,7 @@ use Smartpricing\TraceFlow\Handles\TraceHandle;
 use Smartpricing\TraceFlow\Handles\StepHandle;
 
 /**
- * @method static TraceHandle startTrace(?string $traceId = null, ?string $traceType = null, ?string $title = null, ?string $description = null, ?string $owner = null, ?array $tags = null, ?array $metadata = null, mixed $params = null, ?string $parentTraceId = null)
+ * @method static TraceHandle startTrace(?string $traceId = null, ?string $traceType = null, ?string $title = null, ?string $description = null, ?string $owner = null, ?array $tags = null, ?array $metadata = null, mixed $params = null, ?int $traceTimeoutMs = null, ?int $stepTimeoutMs = null)
  * @method static TraceHandle getTrace(string $traceId)
  * @method static TraceHandle|null getCurrentTrace()
  * @method static mixed runWithTrace(callable $callback, array $traceOptions = [])

@@ -57,10 +57,12 @@ class HttpTransport implements TransportInterface
     {
         match ($event->eventType) {
             TraceEventType::TRACE_STARTED => $this->createTrace($event),
+            TraceEventType::TRACE_UPDATED,
             TraceEventType::TRACE_FINISHED,
             TraceEventType::TRACE_FAILED,
             TraceEventType::TRACE_CANCELLED => $this->updateTrace($event),
             TraceEventType::STEP_STARTED => $this->createStep($event),
+            TraceEventType::STEP_UPDATED,
             TraceEventType::STEP_FINISHED,
             TraceEventType::STEP_FAILED => $this->updateStep($event),
             TraceEventType::LOG_EMITTED => $this->createLog($event),
@@ -85,6 +87,8 @@ class HttpTransport implements TransportInterface
             'metadata' => $event->payload['metadata'] ?? null,
             'params' => $event->payload['params'] ?? null,
             'idempotency_key' => $event->payload['idempotency_key'] ?? $event->eventId,
+            'trace_timeout_ms' => $event->payload['trace_timeout_ms'] ?? null,
+            'step_timeout_ms' => $event->payload['step_timeout_ms'] ?? null,
         ];
 
         $this->executeWithRetry('POST', '/api/v1/traces', $payload);

@@ -46,7 +46,8 @@ class TraceFlowSDK
         ?array $tags = null,
         ?array $metadata = null,
         mixed $params = null,
-        ?string $parentTraceId = null,
+        ?int $traceTimeoutMs = null,
+        ?int $stepTimeoutMs = null,
     ): TraceHandle {
         $traceId = $traceId ?? Uuid::uuid4()->toString();
 
@@ -65,8 +66,9 @@ class TraceFlowSDK
                 'tags' => $tags,
                 'metadata' => $metadata,
                 'params' => $params,
+                'trace_timeout_ms' => $traceTimeoutMs,
+                'step_timeout_ms' => $stepTimeoutMs,
             ]),
-            parentTraceId: $parentTraceId,
         );
 
         $this->sendEvent($event);

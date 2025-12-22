@@ -13,7 +13,6 @@ class TraceEvent
         public readonly string $timestamp,
         public readonly string $source,
         public readonly array $payload,
-        public readonly ?string $parentTraceId = null,
         public readonly ?string $stepId = null,
     ) {
     }
@@ -27,7 +26,6 @@ class TraceEvent
             'timestamp' => $this->timestamp,
             'source' => $this->source,
             'payload' => $this->payload,
-            'parent_trace_id' => $this->parentTraceId,
             'step_id' => $this->stepId,
         ];
     }

@@ -297,8 +297,7 @@ class ImportUsersCommand extends Command
 
 ```php
 // Start trace
-$trace = $sdk->startTrace(
-    traceId: 'custom-id',          // Optional
+$trace = TraceFlow::startTrace(
     traceType: 'process_type',     // Optional
     title: 'Human readable title', // Optional
     description: 'Description',    // Optional
@@ -306,7 +305,8 @@ $trace = $sdk->startTrace(
     tags: ['tag1', 'tag2'],       // Optional
     metadata: ['key' => 'value'], // Optional
     params: $inputData,           // Optional
-    parentTraceId: 'parent-id'    // Optional for distributed tracing
+    traceTimeoutMs: 5000,         // Optional - custom timeout
+    stepTimeoutMs: 2000           // Optional - custom step timeout
 );
 
 // Get existing trace
@@ -348,7 +348,7 @@ $step->fail(error: 'Error message');
 $step->log(message: 'Message', level: 'INFO', ...);
 ```
 
-## 🌐 Distributed Tracing
+## 🌐 Cross-Service Tracing
 
 ### Service A (API Gateway)
 
@@ -356,7 +356,7 @@ $step->log(message: 'Message', level: 'INFO', ...);
 // Service A: Start trace
 $trace = TraceFlow::startTrace(title: 'User Registration');
 
-// Call Service B
+// Call Service B with trace ID
 Http::withHeaders([
     'X-Trace-Id' => $trace->traceId,
 ])->post('http://service-b/api/endpoint', $data);
@@ -367,13 +367,14 @@ $trace->finish();
 ### Service B (Email Service)
 
 ```php
-// Service B: Continue trace
-$parentTraceId = request()->header('X-Trace-Id');
+// Service B: Retrieve existing trace
+$traceId = request()->header('X-Trace-Id');
 
-$trace = TraceFlow::startTrace(
-    title: 'Send Welcome Email',
-    parentTraceId: $parentTraceId
-);
+// Get the trace started by Service A
+$trace = TraceFlow::getTrace($traceId);
+
+// Add steps to the same trace
+$trace->startStep(name: 'Send Welcome Email');
 
 // Process...
 $trace->finish();

@@ -325,13 +325,10 @@ Route::post('/api/complete-registration', function (\Illuminate\Http\Request $re
 // Service B: Email Service (separate app)
 // In Email Service middleware receives X-Trace-Id header
 Route::post('/api/send-welcome', function (\Illuminate\Http\Request $request) {
-    $parentTraceId = $request->header('X-Trace-Id');
+    $traceId = $request->header('X-Trace-Id');
 
-    // Continue parent trace
-    $trace = TraceFlow::startTrace(
-        title: 'Send Welcome Email',
-        parentTraceId: $parentTraceId
-    );
+    // Retrieve existing trace from Service A
+    $trace = TraceFlow::getTrace($traceId);
 
     $step = $trace->startStep(name: 'Send Email');
 

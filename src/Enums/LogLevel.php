@@ -1,6 +1,6 @@
 <?php
 
-namespace Smartpricing\TraceFlow\Enums;
+namespace Smartness\TraceFlow\Enums;
 
 enum LogLevel: string
 {
@@ -10,4 +10,3 @@ enum LogLevel: string
     case ERROR = 'ERROR';
     case FATAL = 'FATAL';
 }
-

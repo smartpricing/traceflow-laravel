@@ -2,13 +2,13 @@
 
 /**
  * Basic Usage Example
- * 
+ *
  * This example shows basic TraceFlow SDK usage in Laravel
  */
 
 use Illuminate\Support\Facades\Route;
-use Smartpricing\TraceFlow\Facades\TraceFlow;
-use Smartpricing\TraceFlow\Enums\LogLevel;
+use Smartness\TraceFlow\Enums\LogLevel;
+use Smartness\TraceFlow\Facades\TraceFlow;
 
 // ============================================================================
 // Example 1: Basic API Endpoint
@@ -23,9 +23,10 @@ Route::get('/api/users/{id}', function (string $id) {
 
     // Step 1: Validate
     $validateStep = $trace->startStep(name: 'Validate Request');
-    if (!is_numeric($id)) {
+    if (! is_numeric($id)) {
         $validateStep->fail('Invalid user ID');
         $trace->fail('Validation failed');
+
         return response()->json(['error' => 'Invalid ID'], 400);
     }
     $validateStep->finish(['valid' => true]);
@@ -39,9 +40,10 @@ Route::get('/api/users/{id}', function (string $id) {
 
     $user = \App\Models\User::find($id);
 
-    if (!$user) {
+    if (! $user) {
         $dbStep->fail('User not found');
         $trace->fail('User not found');
+
         return response()->json(['error' => 'Not found'], 404);
     }
 
@@ -84,9 +86,8 @@ Route::middleware('traceflow')->group(function () {
 class UserService
 {
     public function __construct(
-        private \Smartpricing\TraceFlow\TraceFlowSDK $sdk
-    ) {
-    }
+        private \Smartness\TraceFlow\TraceFlowSDK $sdk
+    ) {}
 
     public function registerUser(array $data, string $traceId): \App\Models\User
     {
@@ -164,6 +165,7 @@ Route::post('/api/register', function (\Illuminate\Http\Request $request, UserSe
         return response()->json($user, 201);
     } catch (\Exception $e) {
         $trace->fail($e);
+
         return response()->json(['error' => $e->getMessage()], 400);
     }
 });
@@ -183,10 +185,9 @@ class ProcessOrderJob implements ShouldQueue
     public function __construct(
         public int $orderId,
         public string $traceId
-    ) {
-    }
+    ) {}
 
-    public function handle(\Smartpricing\TraceFlow\TraceFlowSDK $sdk): void
+    public function handle(\Smartness\TraceFlow\TraceFlowSDK $sdk): void
     {
         // Retrieve trace in job
         $trace = $sdk->getTrace($this->traceId);
@@ -229,9 +230,10 @@ use Illuminate\Console\Command;
 class ImportUsersCommand extends Command
 {
     protected $signature = 'users:import {file}';
+
     protected $description = 'Import users from CSV';
 
-    public function handle(\Smartpricing\TraceFlow\TraceFlowSDK $sdk): void
+    public function handle(\Smartness\TraceFlow\TraceFlowSDK $sdk): void
     {
         $trace = $sdk->startTrace(
             traceType: 'batch_import',
@@ -339,4 +341,3 @@ Route::post('/api/send-welcome', function (\Illuminate\Http\Request $request) {
 
     return response()->json(['status' => 'sent']);
 });
-

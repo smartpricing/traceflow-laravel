@@ -1,11 +1,11 @@
 <?php
 
-namespace Smartpricing\TraceFlow\Handles;
+namespace Smartness\TraceFlow\Handles;
 
 use Ramsey\Uuid\Uuid;
-use Smartpricing\TraceFlow\DTO\TraceEvent;
-use Smartpricing\TraceFlow\Enums\TraceEventType;
-use Smartpricing\TraceFlow\Enums\LogLevel;
+use Smartness\TraceFlow\DTO\TraceEvent;
+use Smartness\TraceFlow\Enums\LogLevel;
+use Smartness\TraceFlow\Enums\TraceEventType;
 
 class TraceHandle
 {
@@ -15,13 +15,13 @@ class TraceHandle
         public readonly string $traceId,
         private string $source,
         private \Closure $sendEvent,
-    ) {
-    }
+    ) {}
 
     public function finish(?array $result = null, ?array $metadata = null): void
     {
         if ($this->closed) {
             error_log("[TraceFlow] Trace {$this->traceId} already closed");
+
             return;
         }
 
@@ -46,6 +46,7 @@ class TraceHandle
     {
         if ($this->closed) {
             error_log("[TraceFlow] Trace {$this->traceId} already closed");
+
             return;
         }
 
@@ -73,6 +74,7 @@ class TraceHandle
     {
         if ($this->closed) {
             error_log("[TraceFlow] Trace {$this->traceId} already closed");
+
             return;
         }
 
@@ -138,4 +140,3 @@ class TraceHandle
         ($this->sendEvent)($event);
     }
 }
-

@@ -1,23 +1,29 @@
 <?php
 
-namespace Smartpricing\TraceFlow;
+namespace Smartness\TraceFlow;
 
-use Ramsey\Uuid\Uuid;
-use Smartpricing\TraceFlow\DTO\TraceEvent;
-use Smartpricing\TraceFlow\Enums\TraceEventType;
-use Smartpricing\TraceFlow\Handles\TraceHandle;
-use Smartpricing\TraceFlow\Handles\StepHandle;
-use Smartpricing\TraceFlow\Transport\TransportInterface;
-use Smartpricing\TraceFlow\Transport\HttpTransport;
 use GuzzleHttp\Client;
+use Ramsey\Uuid\Uuid;
+use Smartness\TraceFlow\DTO\TraceEvent;
+use Smartness\TraceFlow\Enums\TraceEventType;
+use Smartness\TraceFlow\Handles\StepHandle;
+use Smartness\TraceFlow\Handles\TraceHandle;
+use Smartness\TraceFlow\Transport\AsyncHttpTransport;
+use Smartness\TraceFlow\Transport\HttpTransport;
+use Smartness\TraceFlow\Transport\TransportInterface;
 
 class TraceFlowSDK
 {
     private TransportInterface $transport;
+
     private string $source;
+
     private ?string $endpoint;
+
     private bool $silentErrors;
+
     private array $activeTraces = [];
+
     private ?string $currentTraceId = null; // Simple context storage
 
     public function __construct(array $config)
@@ -27,10 +33,21 @@ class TraceFlowSDK
         $this->silentErrors = $config['silent_errors'] ?? true;
 
         // Initialize transport
-        if (($config['transport'] ?? 'http') === 'http') {
-            $this->transport = new HttpTransport($config);
-        } else {
+        $transportType = $config['transport'] ?? 'http';
+
+        if ($transportType === 'http') {
+            // Use async transport by default for better performance
+            $useAsync = $config['async_http'] ?? true;
+
+            if ($useAsync) {
+                $this->transport = new AsyncHttpTransport($config);
+            } else {
+                $this->transport = new HttpTransport($config);
+            }
+        } elseif ($transportType === 'kafka') {
             throw new \RuntimeException('Kafka transport not yet implemented for PHP');
+        } else {
+            throw new \RuntimeException("Unknown transport type: {$transportType}");
         }
     }
 
@@ -89,21 +106,22 @@ class TraceFlowSDK
      */
     public function getTrace(string $traceId): TraceHandle
     {
-        if (!$this->endpoint) {
+        if (! $this->endpoint) {
             error_log('[TraceFlow] getTrace() requires HTTP transport with endpoint');
+
             return new TraceHandle($traceId, $this->source, $this->sendEvent(...));
         }
 
         try {
             $client = new Client(['base_uri' => $this->endpoint]);
             $response = $client->get("/api/v1/traces/{$traceId}/state");
-            
+
             // Update context
             $this->currentTraceId = $traceId;
 
             error_log("[TraceFlow] Retrieved trace: {$traceId}");
         } catch (\Exception $e) {
-            if (!$this->silentErrors) {
+            if (! $this->silentErrors) {
                 throw $e;
             }
             error_log("[TraceFlow] Error getting trace (silenced): {$e->getMessage()}");
@@ -121,7 +139,7 @@ class TraceFlowSDK
      */
     public function getCurrentTrace(): ?TraceHandle
     {
-        if (!$this->currentTraceId) {
+        if (! $this->currentTraceId) {
             return null;
         }
 
@@ -142,6 +160,7 @@ class TraceFlowSDK
         try {
             $result = $callback($trace);
             $trace->finish(['result' => $result]);
+
             return $result;
         } catch (\Throwable $e) {
             $trace->fail($e);
@@ -156,7 +175,7 @@ class TraceFlowSDK
     {
         $targetTraceId = $traceId ?? $this->currentTraceId;
 
-        if (!$targetTraceId || !$this->endpoint) {
+        if (! $targetTraceId || ! $this->endpoint) {
             return;
         }
 
@@ -165,7 +184,7 @@ class TraceFlowSDK
             $client->post("/api/v1/traces/{$targetTraceId}/heartbeat");
             error_log("[TraceFlow] Heartbeat sent for: {$targetTraceId}");
         } catch (\Exception $e) {
-            if (!$this->silentErrors) {
+            if (! $this->silentErrors) {
                 error_log("[TraceFlow] Heartbeat error: {$e->getMessage()}");
             }
         }
@@ -182,8 +201,9 @@ class TraceFlowSDK
     ): ?StepHandle {
         $trace = $this->getCurrentTrace();
 
-        if (!$trace) {
+        if (! $trace) {
             error_log('[TraceFlow] No active trace context for step');
+
             return null;
         }
 
@@ -197,8 +217,9 @@ class TraceFlowSDK
     {
         $trace = $this->getCurrentTrace();
 
-        if (!$trace) {
+        if (! $trace) {
             error_log("[TraceFlow] {$message}");
+
             return;
         }
 
@@ -238,4 +259,3 @@ class TraceFlowSDK
         $this->transport->shutdown();
     }
 }
-

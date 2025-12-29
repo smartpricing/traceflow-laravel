@@ -1,6 +1,6 @@
 <?php
 
-namespace Smartpricing\TraceFlow\Enums;
+namespace Smartness\TraceFlow\Enums;
 
 enum TraceEventType: string
 {
@@ -13,4 +13,3 @@ enum TraceEventType: string
     case STEP_FAILED = 'step_failed';
     case LOG_EMITTED = 'log_emitted';
 }
-

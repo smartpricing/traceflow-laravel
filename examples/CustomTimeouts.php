@@ -2,12 +2,12 @@
 
 /**
  * Custom Timeouts Example for Laravel
- * 
+ *
  * This example demonstrates how to use custom timeouts for traces and steps.
  */
 
 use Illuminate\Support\Facades\Route;
-use Smartpricing\TraceFlow\Facades\TraceFlow;
+use Smartness\TraceFlow\Facades\TraceFlow;
 
 // ============================================================================
 // Example 1: Quick API Call (Short Timeout)
@@ -107,7 +107,7 @@ Route::post('/webhook/process', function (\Illuminate\Http\Request $request) {
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
-use Smartpricing\TraceFlow\TraceFlowSDK;
+use Smartness\TraceFlow\TraceFlowSDK;
 
 class ProcessLargeDataset implements ShouldQueue
 {
@@ -116,8 +116,7 @@ class ProcessLargeDataset implements ShouldQueue
     public function __construct(
         public int $datasetId,
         public string $traceId
-    ) {
-    }
+    ) {}
 
     public function handle(TraceFlowSDK $sdk): void
     {
@@ -170,6 +169,7 @@ use Illuminate\Console\Command;
 class ImportDataCommand extends Command
 {
     protected $signature = 'data:import {file}';
+
     protected $description = 'Import data from file';
 
     public function handle(TraceFlowSDK $sdk): void
@@ -192,19 +192,19 @@ class ImportDataCommand extends Command
 
         $step2 = $trace->startStep(name: 'Import Records');
         $this->info('Importing records...');
-        
+
         $bar = $this->output->createProgressBar(100);
         for ($i = 0; $i < 100; $i++) {
             // Import batch...
             $bar->advance();
-            
+
             // Heartbeat every 10%
             if ($i % 10 === 0) {
                 $sdk->heartbeat($trace->traceId);
             }
         }
         $bar->finish();
-        
+
         $step2->finish(['imported' => 10000]);
 
         $trace->finish(['total_records' => 10000]);
@@ -275,33 +275,33 @@ Route::post('/api/flexible-process', function () {
 
 /**
  * TIMEOUT GUIDELINES
- * 
+ *
  * 1. Quick API Calls: 5-30 seconds
  *    - Health checks
  *    - Simple CRUD operations
  *    - Cache lookups
- * 
+ *
  * 2. Background Jobs: 1-5 minutes
  *    - Email sending
  *    - File processing
  *    - Report generation
- * 
+ *
  * 3. Batch Processing: 10-60 minutes
  *    - Data imports/exports
  *    - Bulk operations
  *    - Database migrations
- * 
+ *
  * 4. Long-Running Tasks: 1-24 hours
  *    - ML training
  *    - Video processing
  *    - Large-scale analytics
- * 
+ *
  * 5. Default (No timeout specified):
  *    - Uses service-level configuration
  *    - Typically 30 minutes trace / 5 minutes step
- * 
+ *
  * BEST PRACTICES:
- * 
+ *
  * - Set realistic timeouts based on expected execution time
  * - Add 20-30% buffer for network delays and retries
  * - Use heartbeats for very long-running processes
@@ -309,4 +309,3 @@ Route::post('/api/flexible-process', function () {
  * - Different environments may need different timeouts
  * - Consider using config/traceflow.php for default values
  */
-

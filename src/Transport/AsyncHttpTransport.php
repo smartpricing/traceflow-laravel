@@ -4,12 +4,20 @@ namespace Smartness\TraceFlow\Transport;
 
 use GuzzleHttp\Client;
 use GuzzleHttp\Exception\GuzzleException;
+use GuzzleHttp\Promise\PromiseInterface;
+use GuzzleHttp\Promise\Utils;
 use Smartness\TraceFlow\DTO\TraceEvent;
 use Smartness\TraceFlow\Enums\StepStatus;
 use Smartness\TraceFlow\Enums\TraceEventType;
 use Smartness\TraceFlow\Enums\TraceStatus;
 
-class HttpTransport implements TransportInterface
+/**
+ * Non-blocking HTTP transport using Guzzle async promises
+ *
+ * Events are sent asynchronously without waiting for responses.
+ * Promises are settled during flush() (called on shutdown).
+ */
+class AsyncHttpTransport implements TransportInterface
 {
     private Client $client;
 
@@ -20,6 +28,11 @@ class HttpTransport implements TransportInterface
     private int $maxRetries;
 
     private int $retryDelay;
+
+    /** @var PromiseInterface[] */
+    private array $promises = [];
+
+    private int $eventCount = 0;
 
     public function __construct(array $config)
     {
@@ -37,27 +50,40 @@ class HttpTransport implements TransportInterface
             $headers['Authorization'] = 'Basic '.$auth;
         }
 
-        $this->client = new Client([
-            'base_uri' => $this->endpoint,
-            'headers' => $headers,
-            'timeout' => $config['timeout'] ?? 5.0,
-        ]);
-    }
-
-    public function send(TraceEvent $event): void
-    {
         try {
-            $this->sendEventToAPI($event);
+            $this->client = new Client([
+                'base_uri' => $this->endpoint,
+                'headers' => $headers,
+                'timeout' => $config['timeout'] ?? 5.0,
+            ]);
         } catch (\Exception $e) {
             if ($this->silentErrors) {
-                error_log("[TraceFlow HTTP] Error sending event (silenced): {$e->getMessage()}");
+                error_log("[TraceFlow Async] Error initializing client (silenced): {$e->getMessage()}");
+                // Create a client without base_uri to allow the SDK to continue
+                $this->client = new Client([
+                    'headers' => $headers,
+                    'timeout' => $config['timeout'] ?? 5.0,
+                ]);
             } else {
                 throw $e;
             }
         }
     }
 
-    private function sendEventToAPI(TraceEvent $event): void
+    public function send(TraceEvent $event): void
+    {
+        try {
+            $this->sendEventToAPIAsync($event);
+        } catch (\Exception $e) {
+            if ($this->silentErrors) {
+                error_log("[TraceFlow Async] Error sending event (silenced): {$e->getMessage()}");
+            } else {
+                throw $e;
+            }
+        }
+    }
+
+    private function sendEventToAPIAsync(TraceEvent $event): void
     {
         match ($event->eventType) {
             TraceEventType::TRACE_STARTED => $this->createTrace($event),
@@ -93,7 +119,7 @@ class HttpTransport implements TransportInterface
             'step_timeout_ms' => $event->payload['step_timeout_ms'] ?? null,
         ];
 
-        $this->executeWithRetry('POST', '/api/v1/traces', $payload);
+        $this->executeAsync('POST', '/api/v1/traces', $payload);
     }
 
     private function updateTrace(TraceEvent $event): void
@@ -115,7 +141,7 @@ class HttpTransport implements TransportInterface
             'metadata' => $event->payload['metadata'] ?? null,
         ];
 
-        $this->executeWithRetry('PATCH', "/api/v1/traces/{$event->traceId}", $payload);
+        $this->executeAsync('PATCH', "/api/v1/traces/{$event->traceId}", $payload);
     }
 
     private function createStep(TraceEvent $event): void
@@ -132,7 +158,7 @@ class HttpTransport implements TransportInterface
             'metadata' => $event->payload['metadata'] ?? null,
         ];
 
-        $this->executeWithRetry('POST', '/api/v1/steps', $payload);
+        $this->executeAsync('POST', '/api/v1/steps', $payload);
     }
 
     private function updateStep(TraceEvent $event): void
@@ -150,7 +176,7 @@ class HttpTransport implements TransportInterface
             'metadata' => $event->payload['metadata'] ?? null,
         ];
 
-        $this->executeWithRetry('PATCH', "/api/v1/steps/{$event->traceId}/{$event->stepId}", $payload);
+        $this->executeAsync('PATCH', "/api/v1/steps/{$event->traceId}/{$event->stepId}", $payload);
     }
 
     private function createLog(TraceEvent $event): void
@@ -166,30 +192,82 @@ class HttpTransport implements TransportInterface
             'event_type' => $event->payload['event_type'] ?? null,
         ];
 
-        $this->executeWithRetry('POST', '/api/v1/logs', $payload);
+        $this->executeAsync('POST', '/api/v1/logs', $payload);
     }
 
-    private function executeWithRetry(string $method, string $uri, array $data, int $attempt = 0): void
+    /**
+     * Execute async HTTP request with retry logic
+     *
+     * Returns immediately without waiting for response.
+     * Retries are handled asynchronously if request fails.
+     */
+    private function executeAsync(string $method, string $uri, array $data, int $attempt = 0): void
     {
+        $promise = $this->client->requestAsync($method, $uri, ['json' => $data])
+            ->then(
+                // Success callback
+                function ($response) {
+                    // Request succeeded, nothing to do
+                    $this->eventCount++;
+                },
+                // Failure callback with retry logic
+                function (GuzzleException $exception) use ($method, $uri, $data, $attempt) {
+                    if ($attempt < $this->maxRetries) {
+                        // Retry with exponential backoff
+                        $delay = $this->retryDelay * pow(2, $attempt);
+                        usleep($delay * 1000);
+                        $this->executeAsync($method, $uri, $data, $attempt + 1);
+                    } else {
+                        // Max retries exceeded
+                        if ($this->silentErrors) {
+                            error_log("[TraceFlow Async] Failed after {$this->maxRetries} retries: {$exception->getMessage()}");
+                        } else {
+                            throw $exception;
+                        }
+                    }
+                }
+            );
+
+        // Store promise for later settling
+        $this->promises[] = $promise;
+    }
+
+    /**
+     * Flush all pending async requests
+     *
+     * Waits for all promises to settle (resolve or reject).
+     * Should be called on shutdown to ensure events are sent.
+     */
+    public function flush(): void
+    {
+        if (empty($this->promises)) {
+            return;
+        }
+
         try {
-            $this->client->request($method, $uri, ['json' => $data]);
-        } catch (GuzzleException $e) {
-            if ($attempt < $this->maxRetries) {
-                usleep($this->retryDelay * 1000 * pow(2, $attempt));
-                $this->executeWithRetry($method, $uri, $data, $attempt + 1);
+            // Wait for all promises to settle
+            Utils::settle($this->promises)->wait();
+
+            error_log("[TraceFlow Async] Flushed {$this->eventCount} events successfully");
+
+            // Clear promises array
+            $this->promises = [];
+            $this->eventCount = 0;
+        } catch (\Exception $e) {
+            if ($this->silentErrors) {
+                error_log("[TraceFlow Async] Error during flush (silenced): {$e->getMessage()}");
             } else {
                 throw $e;
             }
         }
     }
 
-    public function flush(): void
-    {
-        // HTTP is synchronous, nothing to flush
-    }
-
+    /**
+     * Shutdown transport and flush pending events
+     */
     public function shutdown(): void
     {
-        // Nothing to cleanup
+        error_log('[TraceFlow Async] Shutting down async transport...');
+        $this->flush();
     }
 }

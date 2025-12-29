@@ -1,6 +1,6 @@
 <?php
 
-namespace Smartpricing\TraceFlow\Enums;
+namespace Smartness\TraceFlow\Enums;
 
 enum StepStatus: string
 {
@@ -9,4 +9,3 @@ enum StepStatus: string
     case COMPLETED = 'COMPLETED';
     case FAILED = 'FAILED';
 }
-

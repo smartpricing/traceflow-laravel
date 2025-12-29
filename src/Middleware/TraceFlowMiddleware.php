@@ -1,29 +1,27 @@
 <?php
 
-namespace Smartpricing\TraceFlow\Middleware;
+namespace Smartness\TraceFlow\Middleware;
 
 use Closure;
 use Illuminate\Http\Request;
-use Smartpricing\TraceFlow\TraceFlowSDK;
+use Smartness\TraceFlow\TraceFlowSDK;
 use Symfony\Component\HttpFoundation\Response;
 
 class TraceFlowMiddleware
 {
-    public function __construct(private TraceFlowSDK $sdk)
-    {
-    }
+    public function __construct(private TraceFlowSDK $sdk) {}
 
     /**
      * Handle an incoming request.
      */
     public function handle(Request $request, Closure $next): Response
     {
-        if (!config('traceflow.middleware.enabled')) {
+        if (! config('traceflow.middleware.enabled')) {
             return $next($request);
         }
 
         $headerName = config('traceflow.middleware.header_name', 'X-Trace-Id');
-        
+
         // Get trace ID from header or generate new
         $traceId = $request->header($headerName) ?? \Ramsey\Uuid\Uuid::uuid4()->toString();
 
@@ -70,4 +68,3 @@ class TraceFlowMiddleware
         }
     }
 }
-

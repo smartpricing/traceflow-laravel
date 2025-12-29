@@ -1,6 +1,6 @@
 <?php
 
-namespace Smartpricing\TraceFlow;
+namespace Smartness\TraceFlow;
 
 use Illuminate\Support\ServiceProvider;
 
@@ -21,6 +21,7 @@ class TraceFlowServiceProvider extends ServiceProvider
                 'transport' => config('traceflow.transport'),
                 'source' => config('traceflow.source'),
                 'endpoint' => config('traceflow.endpoint'),
+                'async_http' => config('traceflow.async_http'),
                 'api_key' => config('traceflow.api_key'),
                 'username' => config('traceflow.username'),
                 'password' => config('traceflow.password'),
@@ -46,6 +47,11 @@ class TraceFlowServiceProvider extends ServiceProvider
                 __DIR__.'/../config/traceflow.php' => config_path('traceflow.php'),
             ], 'traceflow-config');
         }
+
+        // Register shutdown handler to flush async events
+        $this->app->terminating(function () {
+            $sdk = $this->app->make(TraceFlowSDK::class);
+            $sdk->shutdown();
+        });
     }
 }
-

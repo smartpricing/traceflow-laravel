@@ -1,8 +1,8 @@
 <?php
 
-namespace Smartpricing\TraceFlow\DTO;
+namespace Smartness\TraceFlow\DTO;
 
-use Smartpricing\TraceFlow\Enums\TraceEventType;
+use Smartness\TraceFlow\Enums\TraceEventType;
 
 class TraceEvent
 {
@@ -14,8 +14,7 @@ class TraceEvent
         public readonly string $source,
         public readonly array $payload,
         public readonly ?string $stepId = null,
-    ) {
-    }
+    ) {}
 
     public function toArray(): array
     {
@@ -35,4 +34,3 @@ class TraceEvent
         return json_encode($this->toArray());
     }
 }
-

@@ -27,13 +27,17 @@ return [
     |--------------------------------------------------------------------------
     */
     'endpoint' => env('TRACEFLOW_ENDPOINT', 'http://localhost:3009'),
-    
+
+    // Use async HTTP (non-blocking) for better performance
+    // Set to false to use synchronous HTTP (blocking)
+    'async_http' => env('TRACEFLOW_ASYNC_HTTP', true),
+
     'api_key' => env('TRACEFLOW_API_KEY'),
-    
+
     'username' => env('TRACEFLOW_USERNAME'),
-    
+
     'password' => env('TRACEFLOW_PASSWORD'),
-    
+
     'timeout' => env('TRACEFLOW_TIMEOUT', 5.0),
 
     /*
@@ -42,7 +46,7 @@ return [
     |--------------------------------------------------------------------------
     */
     'max_retries' => env('TRACEFLOW_MAX_RETRIES', 3),
-    
+
     'retry_delay' => env('TRACEFLOW_RETRY_DELAY', 1000), // milliseconds
 
     /*
@@ -62,4 +66,3 @@ return [
         'header_name' => 'X-Trace-Id',
     ],
 ];
-

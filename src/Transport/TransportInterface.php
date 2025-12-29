@@ -1,8 +1,8 @@
 <?php
 
-namespace Smartpricing\TraceFlow\Transport;
+namespace Smartness\TraceFlow\Transport;
 
-use Smartpricing\TraceFlow\DTO\TraceEvent;
+use Smartness\TraceFlow\DTO\TraceEvent;
 
 interface TransportInterface
 {
@@ -21,4 +21,3 @@ interface TransportInterface
      */
     public function shutdown(): void;
 }
-

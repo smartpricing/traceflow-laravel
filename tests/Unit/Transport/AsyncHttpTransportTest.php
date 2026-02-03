@@ -34,7 +34,6 @@ class AsyncHttpTransportTest extends TestCase
 
         $reflection = new \ReflectionClass($transport);
         $clientProperty = $reflection->getProperty('client');
-        $clientProperty->setAccessible(true);
 
         $client = new Client([
             'handler' => $handlerStack,

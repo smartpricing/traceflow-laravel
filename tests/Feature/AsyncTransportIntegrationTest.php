@@ -18,7 +18,8 @@ class AsyncTransportIntegrationTest extends TestCase
             'transport' => 'http',
             'async_http' => true,
             'source' => 'integration-test',
-            'endpoint' => 'http://localhost:3009',
+            'endpoint' => getenv('TRACEFLOW_ENDPOINT') ?: 'http://localhost:3009',
+            'api_key' => getenv('TRACEFLOW_API_KEY') ?: null,
             'timeout' => 5.0,
             'max_retries' => 3,
             'silent_errors' => true,
@@ -27,12 +28,19 @@ class AsyncTransportIntegrationTest extends TestCase
         return new TraceFlowSDK(array_merge($defaultConfig, $config));
     }
 
+    private function generateUniqueTraceId(): string
+    {
+        // Generate unique UUIDv4 - each test run gets a fresh UUID
+        return \Ramsey\Uuid\Uuid::uuid4()->toString();
+    }
+
     public function test_complete_trace_lifecycle_with_async_transport(): void
     {
         $sdk = $this->createSDK();
 
-        // Start trace
+        // Start trace with unique ID
         $trace = $sdk->startTrace(
+            traceId: $this->generateUniqueTraceId(),
             traceType: 'integration_test',
             title: 'Complete Lifecycle Test',
             description: 'Testing async transport end-to-end',
@@ -80,6 +88,7 @@ class AsyncTransportIntegrationTest extends TestCase
         // Start 5 concurrent traces
         for ($i = 0; $i < 5; $i++) {
             $traces[] = $sdk->startTrace(
+                traceId: $this->generateUniqueTraceId(),
                 title: "Concurrent Trace $i",
                 metadata: ['index' => $i]
             );
@@ -105,7 +114,10 @@ class AsyncTransportIntegrationTest extends TestCase
     {
         $sdk = $this->createSDK();
 
-        $trace = $sdk->startTrace(title: 'Failing Trace');
+        $trace = $sdk->startTrace(
+            traceId: $this->generateUniqueTraceId(),
+            title: 'Failing Trace'
+        );
 
         $step = $trace->startStep(name: 'Failing Step');
 
@@ -125,7 +137,10 @@ class AsyncTransportIntegrationTest extends TestCase
     {
         $sdk = $this->createSDK();
 
-        $trace = $sdk->startTrace(title: 'Cancelled Trace');
+        $trace = $sdk->startTrace(
+            traceId: $this->generateUniqueTraceId(),
+            title: 'Cancelled Trace'
+        );
 
         $step = $trace->startStep(name: 'Step');
 
@@ -141,7 +156,10 @@ class AsyncTransportIntegrationTest extends TestCase
     {
         $sdk = $this->createSDK();
 
-        $trace = $sdk->startTrace(title: 'Nested Steps Test');
+        $trace = $sdk->startTrace(
+            traceId: $this->generateUniqueTraceId(),
+            title: 'Nested Steps Test'
+        );
 
         // Parent step
         $parentStep = $trace->startStep(name: 'Parent Step');
@@ -175,7 +193,10 @@ class AsyncTransportIntegrationTest extends TestCase
         for ($i = 0; $i < $iterations; $i++) {
             $start = microtime(true);
 
-            $trace = $sdk->startTrace(title: "Performance Test $i");
+            $trace = $sdk->startTrace(
+                traceId: $this->generateUniqueTraceId(),
+                title: "Performance Test $i"
+            );
             $step = $trace->startStep(name: 'Step');
             $step->finish();
             $trace->finish();
@@ -197,7 +218,10 @@ class AsyncTransportIntegrationTest extends TestCase
         $sdk = $this->createSDK();
 
         // Start trace
-        $trace = $sdk->startTrace(title: 'Context Test');
+        $trace = $sdk->startTrace(
+            traceId: $this->generateUniqueTraceId(),
+            title: 'Context Test'
+        );
 
         // getCurrentTrace should return the active trace
         $currentTrace = $sdk->getCurrentTrace();
@@ -224,7 +248,10 @@ class AsyncTransportIntegrationTest extends TestCase
         $sdk = $this->createSDK();
 
         // Start initial trace
-        $originalTrace = $sdk->startTrace(title: 'Original Trace');
+        $originalTrace = $sdk->startTrace(
+            traceId: $this->generateUniqueTraceId(),
+            title: 'Original Trace'
+        );
         $traceId = $originalTrace->traceId;
 
         // Simulate retrieving trace in another context
@@ -256,6 +283,7 @@ class AsyncTransportIntegrationTest extends TestCase
                 return 'operation_result';
             },
             [
+                'traceId' => $this->generateUniqueTraceId(),
                 'title' => 'Helper Trace',
                 'traceType' => 'helper_test',
             ]
@@ -270,7 +298,10 @@ class AsyncTransportIntegrationTest extends TestCase
     {
         $sdk = $this->createSDK();
 
-        $trace = $sdk->startTrace(title: 'Heartbeat Test');
+        $trace = $sdk->startTrace(
+            traceId: $this->generateUniqueTraceId(),
+            title: 'Heartbeat Test'
+        );
 
         // Send heartbeat
         $sdk->heartbeat($trace->traceId);
@@ -322,7 +353,10 @@ class AsyncTransportIntegrationTest extends TestCase
         ]);
 
         // Should not throw exceptions
-        $trace = $sdk->startTrace(title: 'Silent Error Test');
+        $trace = $sdk->startTrace(
+            traceId: $this->generateUniqueTraceId(),
+            title: 'Silent Error Test'
+        );
         $trace->finish();
 
         $sdk->flush();

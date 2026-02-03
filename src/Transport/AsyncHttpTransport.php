@@ -70,7 +70,7 @@ class AsyncHttpTransport implements TransportInterface
         }
     }
 
-    public function send(TraceEvent $event): void
+    public function send(TraceEvent $event)
     {
         try {
             $this->sendEventToAPIAsync($event);
@@ -83,7 +83,7 @@ class AsyncHttpTransport implements TransportInterface
         }
     }
 
-    private function sendEventToAPIAsync(TraceEvent $event): void
+    private function sendEventToAPIAsync(TraceEvent $event)
     {
         match ($event->eventType) {
             TraceEventType::TRACE_STARTED => $this->createTrace($event),
@@ -98,9 +98,9 @@ class AsyncHttpTransport implements TransportInterface
         };
     }
 
-    private function createTrace(TraceEvent $event): void
+    private function createTrace(TraceEvent $event)
     {
-        $payload = [
+        $payload = array_filter([
             'trace_id' => $event->traceId,
             'trace_type' => $event->payload['trace_type'] ?? null,
             'status' => TraceStatus::PENDING->value,
@@ -117,12 +117,12 @@ class AsyncHttpTransport implements TransportInterface
             'idempotency_key' => $event->payload['idempotency_key'] ?? $event->eventId,
             'trace_timeout_ms' => $event->payload['trace_timeout_ms'] ?? null,
             'step_timeout_ms' => $event->payload['step_timeout_ms'] ?? null,
-        ];
+        ], fn($value) => $value !== null);
 
         $this->executeAsync('POST', '/api/v1/traces', $payload);
     }
 
-    private function updateTrace(TraceEvent $event): void
+    private function updateTrace(TraceEvent $event)
     {
         $status = match ($event->eventType) {
             TraceEventType::TRACE_FINISHED => TraceStatus::SUCCESS,
@@ -131,7 +131,7 @@ class AsyncHttpTransport implements TransportInterface
             default => TraceStatus::RUNNING,
         };
 
-        $payload = [
+        $payload = array_filter([
             'status' => $status->value,
             'updated_at' => $event->timestamp,
             'finished_at' => $event->timestamp,
@@ -139,14 +139,14 @@ class AsyncHttpTransport implements TransportInterface
             'result' => $event->payload['result'] ?? null,
             'error' => $event->payload['error'] ?? null,
             'metadata' => $event->payload['metadata'] ?? null,
-        ];
+        ], fn($value) => $value !== null);
 
         $this->executeAsync('PATCH', "/api/v1/traces/{$event->traceId}", $payload);
     }
 
-    private function createStep(TraceEvent $event): void
+    private function createStep(TraceEvent $event)
     {
-        $payload = [
+        $payload = array_filter([
             'trace_id' => $event->traceId,
             'step_id' => $event->stepId,
             'step_type' => $event->payload['step_type'] ?? null,
@@ -156,32 +156,32 @@ class AsyncHttpTransport implements TransportInterface
             'updated_at' => $event->timestamp,
             'input' => $event->payload['input'] ?? null,
             'metadata' => $event->payload['metadata'] ?? null,
-        ];
+        ], fn($value) => $value !== null);
 
         $this->executeAsync('POST', '/api/v1/steps', $payload);
     }
 
-    private function updateStep(TraceEvent $event): void
+    private function updateStep(TraceEvent $event)
     {
         $status = $event->eventType === TraceEventType::STEP_FINISHED
             ? StepStatus::COMPLETED
             : StepStatus::FAILED;
 
-        $payload = [
+        $payload = array_filter([
             'status' => $status->value,
             'updated_at' => $event->timestamp,
             'finished_at' => $event->timestamp,
             'output' => $event->payload['output'] ?? null,
             'error' => $event->payload['error'] ?? null,
             'metadata' => $event->payload['metadata'] ?? null,
-        ];
+        ], fn($value) => $value !== null);
 
         $this->executeAsync('PATCH', "/api/v1/steps/{$event->traceId}/{$event->stepId}", $payload);
     }
 
-    private function createLog(TraceEvent $event): void
+    private function createLog(TraceEvent $event)
     {
-        $payload = [
+        $payload = array_filter([
             'trace_id' => $event->traceId,
             'log_time' => $event->timestamp,
             'log_id' => $event->eventId,
@@ -190,7 +190,7 @@ class AsyncHttpTransport implements TransportInterface
             'details' => $event->payload['details'] ?? null,
             'source' => $event->source,
             'event_type' => $event->payload['event_type'] ?? null,
-        ];
+        ], fn($value) => $value !== null);
 
         $this->executeAsync('POST', '/api/v1/logs', $payload);
     }
@@ -201,7 +201,7 @@ class AsyncHttpTransport implements TransportInterface
      * Returns immediately without waiting for response.
      * Retries are handled asynchronously if request fails.
      */
-    private function executeAsync(string $method, string $uri, array $data, int $attempt = 0): void
+    private function executeAsync(string $method, string $uri, array $data, int $attempt = 0)
     {
         $promise = $this->client->requestAsync($method, $uri, ['json' => $data])
             ->then(
@@ -238,7 +238,7 @@ class AsyncHttpTransport implements TransportInterface
      * Waits for all promises to settle (resolve or reject).
      * Should be called on shutdown to ensure events are sent.
      */
-    public function flush(): void
+    public function flush()
     {
         if (empty($this->promises)) {
             return;
@@ -265,7 +265,7 @@ class AsyncHttpTransport implements TransportInterface
     /**
      * Shutdown transport and flush pending events
      */
-    public function shutdown(): void
+    public function shutdown()
     {
         error_log('[TraceFlow Async] Shutting down async transport...');
         $this->flush();

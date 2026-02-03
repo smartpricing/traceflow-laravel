@@ -44,7 +44,7 @@ class HttpTransport implements TransportInterface
         ]);
     }
 
-    public function send(TraceEvent $event): void
+    public function send(TraceEvent $event)
     {
         try {
             $this->sendEventToAPI($event);
@@ -57,7 +57,7 @@ class HttpTransport implements TransportInterface
         }
     }
 
-    private function sendEventToAPI(TraceEvent $event): void
+    private function sendEventToAPI(TraceEvent $event)
     {
         match ($event->eventType) {
             TraceEventType::TRACE_STARTED => $this->createTrace($event),
@@ -72,9 +72,9 @@ class HttpTransport implements TransportInterface
         };
     }
 
-    private function createTrace(TraceEvent $event): void
+    private function createTrace(TraceEvent $event)
     {
-        $payload = [
+        $payload = array_filter([
             'trace_id' => $event->traceId,
             'trace_type' => $event->payload['trace_type'] ?? null,
             'status' => TraceStatus::PENDING->value,
@@ -91,12 +91,12 @@ class HttpTransport implements TransportInterface
             'idempotency_key' => $event->payload['idempotency_key'] ?? $event->eventId,
             'trace_timeout_ms' => $event->payload['trace_timeout_ms'] ?? null,
             'step_timeout_ms' => $event->payload['step_timeout_ms'] ?? null,
-        ];
+        ], fn($value) => $value !== null);
 
         $this->executeWithRetry('POST', '/api/v1/traces', $payload);
     }
 
-    private function updateTrace(TraceEvent $event): void
+    private function updateTrace(TraceEvent $event)
     {
         $status = match ($event->eventType) {
             TraceEventType::TRACE_FINISHED => TraceStatus::SUCCESS,
@@ -105,7 +105,7 @@ class HttpTransport implements TransportInterface
             default => TraceStatus::RUNNING,
         };
 
-        $payload = [
+        $payload = array_filter([
             'status' => $status->value,
             'updated_at' => $event->timestamp,
             'finished_at' => $event->timestamp,
@@ -113,14 +113,14 @@ class HttpTransport implements TransportInterface
             'result' => $event->payload['result'] ?? null,
             'error' => $event->payload['error'] ?? null,
             'metadata' => $event->payload['metadata'] ?? null,
-        ];
+        ], fn($value) => $value !== null);
 
         $this->executeWithRetry('PATCH', "/api/v1/traces/{$event->traceId}", $payload);
     }
 
-    private function createStep(TraceEvent $event): void
+    private function createStep(TraceEvent $event)
     {
-        $payload = [
+        $payload = array_filter([
             'trace_id' => $event->traceId,
             'step_id' => $event->stepId,
             'step_type' => $event->payload['step_type'] ?? null,
@@ -130,32 +130,32 @@ class HttpTransport implements TransportInterface
             'updated_at' => $event->timestamp,
             'input' => $event->payload['input'] ?? null,
             'metadata' => $event->payload['metadata'] ?? null,
-        ];
+        ], fn($value) => $value !== null);
 
         $this->executeWithRetry('POST', '/api/v1/steps', $payload);
     }
 
-    private function updateStep(TraceEvent $event): void
+    private function updateStep(TraceEvent $event)
     {
         $status = $event->eventType === TraceEventType::STEP_FINISHED
             ? StepStatus::COMPLETED
             : StepStatus::FAILED;
 
-        $payload = [
+        $payload = array_filter([
             'status' => $status->value,
             'updated_at' => $event->timestamp,
             'finished_at' => $event->timestamp,
             'output' => $event->payload['output'] ?? null,
             'error' => $event->payload['error'] ?? null,
             'metadata' => $event->payload['metadata'] ?? null,
-        ];
+        ], fn($value) => $value !== null);
 
         $this->executeWithRetry('PATCH', "/api/v1/steps/{$event->traceId}/{$event->stepId}", $payload);
     }
 
-    private function createLog(TraceEvent $event): void
+    private function createLog(TraceEvent $event)
     {
-        $payload = [
+        $payload = array_filter([
             'trace_id' => $event->traceId,
             'log_time' => $event->timestamp,
             'log_id' => $event->eventId,
@@ -164,12 +164,12 @@ class HttpTransport implements TransportInterface
             'details' => $event->payload['details'] ?? null,
             'source' => $event->source,
             'event_type' => $event->payload['event_type'] ?? null,
-        ];
+        ], fn($value) => $value !== null);
 
         $this->executeWithRetry('POST', '/api/v1/logs', $payload);
     }
 
-    private function executeWithRetry(string $method, string $uri, array $data, int $attempt = 0): void
+    private function executeWithRetry(string $method, string $uri, array $data, int $attempt = 0)
     {
         try {
             $this->client->request($method, $uri, ['json' => $data]);
@@ -183,12 +183,12 @@ class HttpTransport implements TransportInterface
         }
     }
 
-    public function flush(): void
+    public function flush()
     {
         // HTTP is synchronous, nothing to flush
     }
 
-    public function shutdown(): void
+    public function shutdown()
     {
         // Nothing to cleanup
     }

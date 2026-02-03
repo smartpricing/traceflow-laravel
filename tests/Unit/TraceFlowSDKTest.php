@@ -21,7 +21,6 @@ class TraceFlowSDKTest extends TestCase
         // Use reflection to check transport type
         $reflection = new \ReflectionClass($sdk);
         $transportProperty = $reflection->getProperty('transport');
-        $transportProperty->setAccessible(true);
         $transport = $transportProperty->getValue($sdk);
 
         $this->assertInstanceOf(
@@ -43,7 +42,6 @@ class TraceFlowSDKTest extends TestCase
 
         $reflection = new \ReflectionClass($sdk);
         $transportProperty = $reflection->getProperty('transport');
-        $transportProperty->setAccessible(true);
         $transport = $transportProperty->getValue($sdk);
 
         $this->assertInstanceOf(AsyncHttpTransport::class, $transport);
@@ -61,7 +59,6 @@ class TraceFlowSDKTest extends TestCase
 
         $reflection = new \ReflectionClass($sdk);
         $transportProperty = $reflection->getProperty('transport');
-        $transportProperty->setAccessible(true);
         $transport = $transportProperty->getValue($sdk);
 
         $this->assertInstanceOf(

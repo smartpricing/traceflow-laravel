@@ -1,5 +1,7 @@
 # TraceFlow SDK for Laravel
 
+> **📦 Packagist Package:** This package is automatically synchronized to [`smartpricing/traceflow-laravel`](https://github.com/smartpricing/traceflow-laravel) for Packagist distribution. Install via Composer from the split repository.
+
 [![Packagist Version](https://img.shields.io/packagist/v/smartness/traceflow-laravel.svg)](https://packagist.org/packages/smartness/traceflow-laravel)
 [![PHP Version](https://img.shields.io/badge/PHP-8.1+-blue.svg)](https://www.php.net/)
 [![Laravel Version](https://img.shields.io/badge/Laravel-10%20%7C%2011-orange.svg)](https://laravel.com/)

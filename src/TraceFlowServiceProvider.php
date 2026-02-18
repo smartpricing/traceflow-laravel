@@ -3,6 +3,7 @@
 namespace Smartness\TraceFlow;
 
 use Illuminate\Support\ServiceProvider;
+use Smartness\TraceFlow\Console\TestCommand;
 
 class TraceFlowServiceProvider extends ServiceProvider
 {
@@ -41,11 +42,14 @@ class TraceFlowServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
-        // Publish config
         if ($this->app->runningInConsole()) {
+            // Publish config
             $this->publishes([
                 __DIR__.'/../config/traceflow.php' => config_path('traceflow.php'),
             ], 'traceflow-config');
+
+            // Register commands
+            $this->commands([TestCommand::class]);
         }
 
         // Register shutdown handler to flush async events

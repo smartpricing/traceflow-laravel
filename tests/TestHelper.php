@@ -14,7 +14,7 @@ class TestHelper
      */
     public static function isServerAvailable(): bool
     {
-        $endpoint = getenv('TRACEFLOW_ENDPOINT') ?: 'http://localhost:3009';
+        $endpoint = getenv('TRACEFLOW_URL') ?: 'http://localhost:3009';
 
         $ch = curl_init($endpoint);
         curl_setopt($ch, CURLOPT_NOBODY, true);
@@ -37,8 +37,8 @@ class TestHelper
         if (!self::isServerAvailable()) {
             $test->markTestSkipped(
                 'TraceFlow API server is not available at ' .
-                (getenv('TRACEFLOW_ENDPOINT') ?: 'http://localhost:3009') .
-                '. Start the server or set TRACEFLOW_ENDPOINT to skip integration tests.'
+                (getenv('TRACEFLOW_URL') ?: 'http://localhost:3009') .
+                '. Start the server or set TRACEFLOW_URL to skip integration tests.'
             );
         }
     }
@@ -48,7 +48,7 @@ class TestHelper
      */
     public static function getEndpoint(): string
     {
-        return getenv('TRACEFLOW_ENDPOINT') ?: 'http://localhost:3009';
+        return getenv('TRACEFLOW_URL') ?: 'http://localhost:3009';
     }
 
     /**

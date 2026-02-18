@@ -40,6 +40,7 @@ TraceFlow SDK for Laravel provides enterprise-grade distributed tracing capabili
 - 📝 **Event-Based** - Append-only event model for audit trails and replay capabilities
 - 🚀 **Laravel Integration** - Seamless integration via Middleware, Facade, and Service Provider
 - 🌐 **Cross-Service Tracing** - Propagate trace context across distributed systems
+- 📨 **Queue Context Propagation** - Automatic trace context flow through queue jobs
 - ✅ **90%+ Test Coverage** - Comprehensive unit and integration test suite
 
 ## 📦 Installation
@@ -61,7 +62,7 @@ Configure in `.env`:
 ```env
 TRACEFLOW_TRANSPORT=http
 TRACEFLOW_SOURCE=my-laravel-app
-TRACEFLOW_ENDPOINT=http://localhost:3009
+TRACEFLOW_URL=http://localhost:3009
 TRACEFLOW_API_KEY=your-api-key
 
 # Optional
@@ -71,6 +72,9 @@ TRACEFLOW_SILENT_ERRORS=true
 
 # Performance (Async HTTP enabled by default)
 TRACEFLOW_ASYNC_HTTP=true
+
+# Queue context propagation (enabled by default)
+TRACEFLOW_QUEUE_PROPAGATE=true
 ```
 
 ## 🚀 Quick Start
@@ -236,33 +240,60 @@ class OrderService
 }
 ```
 
-### Pattern 3: Background Jobs
+### Pattern 3: Static Context Access
+
+Access the current trace from anywhere without DI:
 
 ```php
-use Smartness\TraceFlow\Facades\TraceFlow;
+use Smartness\TraceFlow\Context\TraceFlowContext;
+
+class DeeplyNestedService
+{
+    public function doWork(): void
+    {
+        // No SDK injection needed — works anywhere during the request
+        $traceId = TraceFlowContext::currentTraceId();
+
+        if (TraceFlowContext::hasActiveTrace()) {
+            // Use $traceId for logging, external API calls, etc.
+            Log::info('Processing', ['trace_id' => $traceId]);
+        }
+    }
+}
+```
+
+### Pattern 4: Queue Jobs with Automatic Context
+
+Use the `TracedJob` trait for automatic trace propagation through queue jobs:
+
+```php
+use Smartness\TraceFlow\Queue\TracedJob;
 
 class ProcessOrderJob implements ShouldQueue
 {
-    public function __construct(
-        public Order $order,
-        public string $traceId
-    ) {
+    use TracedJob;
+
+    public function __construct(public Order $order)
+    {
+        $this->initializeTracedJob(); // Captures current trace context
     }
-    
+
     public function handle(): void
     {
-        // Retrieve trace in job
-        $trace = TraceFlow::getTrace($this->traceId);
-        
+        // Trace context is automatically restored!
+        $trace = TraceFlow::getCurrentTrace();
+
         $step = $trace->startStep(
             name: 'Background Processing',
             stepType: 'job'
         );
-        
+
         try {
-            // Process order...
             $this->order->process();
-            
+
+            // Dispatching another job? Context propagates automatically.
+            SendConfirmationEmail::dispatch($this->order);
+
             $step->finish(['processed' => true]);
         } catch (\Exception $e) {
             $step->fail($e);
@@ -271,20 +302,20 @@ class ProcessOrderJob implements ShouldQueue
     }
 }
 
-// Dispatch job with trace ID
+// Dispatch — no need to pass trace ID manually
 Route::post('/orders', function (Request $request) {
     $trace = TraceFlow::startTrace(title: 'Create Order');
-    
+
     $order = Order::create($request->all());
-    
-    // Pass trace ID to job
-    ProcessOrderJob::dispatch($order, $trace->traceId);
-    
+    ProcessOrderJob::dispatch($order); // Context captured automatically
+
     return response()->json($order);
 });
 ```
 
-### Pattern 4: Long-Running Processes
+The trace context chains through any depth of job dispatches: Job A -> Job B -> Job C all share the same trace ID.
+
+### Pattern 5: Long-Running Processes
 
 ```php
 use Smartness\TraceFlow\Facades\TraceFlow;
@@ -342,8 +373,11 @@ $trace = TraceFlow::startTrace(
 // Get existing trace
 $trace = $sdk->getTrace('trace-id');
 
-// Get current trace from context
+// Get current trace from context (checks SDK state + TraceFlowContext)
 $trace = $sdk->getCurrentTrace();
+
+// Set trace ID manually (used by queue middleware)
+$sdk->setCurrentTraceId('trace-id');
 
 // Send heartbeat
 $sdk->heartbeat('trace-id');
@@ -469,7 +503,7 @@ return [
     'transport' => 'http',                    // or 'kafka'
     'async_http' => true,                     // Use async HTTP (default: true)
     'source' => env('APP_NAME'),
-    'endpoint' => 'http://localhost:3009',
+    'endpoint' => 'http://localhost:3009',  // env: TRACEFLOW_URL
     'api_key' => 'your-api-key',
     'username' => 'user',
     'password' => 'pass',
@@ -481,6 +515,10 @@ return [
     'middleware' => [
         'enabled' => true,
         'header_name' => 'X-Trace-Id',
+    ],
+
+    'queue' => [
+        'propagate_context' => true,
     ],
 ];
 ```
@@ -531,7 +569,7 @@ TRACEFLOW_ASYNC_HTTP=false
    ```
 
 2. **Use middleware for automatic HTTP tracing**
-3. **Pass trace IDs to queued jobs**
+3. **Use the `TracedJob` trait** for automatic queue context propagation
 4. **Send heartbeats for long-running processes**
 5. **Use environment variables for configuration**
 

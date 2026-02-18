@@ -26,7 +26,7 @@ return [
     | HTTP Transport Options
     |--------------------------------------------------------------------------
     */
-    'endpoint' => env('TRACEFLOW_ENDPOINT', 'http://localhost:3009'),
+    'endpoint' => env('TRACEFLOW_URL', 'http://localhost:3009'),
 
     // Use async HTTP (non-blocking) for better performance
     // Set to false to use synchronous HTTP (blocking)
@@ -64,5 +64,19 @@ return [
     'middleware' => [
         'enabled' => env('TRACEFLOW_MIDDLEWARE_ENABLED', true),
         'header_name' => 'X-Trace-Id',
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Queue Configuration
+    |--------------------------------------------------------------------------
+    |
+    | Controls trace context propagation through queue jobs.
+    | Jobs using the TracedJob trait will automatically capture and restore
+    | the active trace context.
+    |
+    */
+    'queue' => [
+        'propagate_context' => env('TRACEFLOW_QUEUE_PROPAGATE', true),
     ],
 ];

@@ -44,7 +44,7 @@ php vendor/bin/phpunit --testdox
 ## Variabili d'Ambiente
 
 ```env
-TRACEFLOW_ENDPOINT=http://localhost:3009
+TRACEFLOW_URL=http://localhost:3009
 TRACEFLOW_API_KEY=your-api-key-here
 SKIP_INTEGRATION_TESTS=false
 ```

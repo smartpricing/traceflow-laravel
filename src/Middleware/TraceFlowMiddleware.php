@@ -4,6 +4,7 @@ namespace Smartness\TraceFlow\Middleware;
 
 use Closure;
 use Illuminate\Http\Request;
+use Smartness\TraceFlow\Context\TraceFlowContext;
 use Smartness\TraceFlow\TraceFlowSDK;
 use Symfony\Component\HttpFoundation\Response;
 
@@ -44,6 +45,9 @@ class TraceFlowMiddleware
             );
         }
 
+        // Set static context so any class can access the trace
+        TraceFlowContext::set($traceId);
+
         // Store trace ID in request
         $request->attributes->set('trace_id', $traceId);
         $request->attributes->set('trace', $trace);
@@ -65,6 +69,8 @@ class TraceFlowMiddleware
             // Failure
             $trace->fail($e);
             throw $e;
+        } finally {
+            TraceFlowContext::clear();
         }
     }
 }

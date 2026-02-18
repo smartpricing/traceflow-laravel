@@ -20,7 +20,7 @@ class TraceLifecycleTest extends TestCase
             'transport' => 'http',
             'async_http' => true,
             'source' => 'lifecycle-test',
-            'endpoint' => getenv('TRACEFLOW_ENDPOINT') ?: 'http://localhost:3009',
+            'endpoint' => getenv('TRACEFLOW_URL') ?: 'http://localhost:3009',
             'api_key' => getenv('TRACEFLOW_API_KEY') ?: null,
             'timeout' => 5.0,
             'max_retries' => 3,

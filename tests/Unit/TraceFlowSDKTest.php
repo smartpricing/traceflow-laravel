@@ -3,12 +3,18 @@
 namespace Smartness\TraceFlow\Tests\Unit;
 
 use PHPUnit\Framework\TestCase;
+use Smartness\TraceFlow\Context\TraceFlowContext;
 use Smartness\TraceFlow\TraceFlowSDK;
 use Smartness\TraceFlow\Transport\AsyncHttpTransport;
 use Smartness\TraceFlow\Transport\HttpTransport;
 
 class TraceFlowSDKTest extends TestCase
 {
+    protected function tearDown(): void
+    {
+        TraceFlowContext::clear();
+        parent::tearDown();
+    }
     public function test_uses_async_http_transport_by_default(): void
     {
         $sdk = new TraceFlowSDK([

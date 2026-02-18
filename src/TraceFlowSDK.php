@@ -8,6 +8,7 @@ use Smartness\TraceFlow\DTO\TraceEvent;
 use Smartness\TraceFlow\Enums\TraceEventType;
 use Smartness\TraceFlow\Handles\StepHandle;
 use Smartness\TraceFlow\Handles\TraceHandle;
+use Smartness\TraceFlow\Context\TraceFlowContext;
 use Smartness\TraceFlow\Transport\AsyncHttpTransport;
 use Smartness\TraceFlow\Transport\HttpTransport;
 use Smartness\TraceFlow\Transport\TransportInterface;
@@ -93,6 +94,7 @@ class TraceFlowSDK
         // Track trace
         $this->activeTraces[$traceId] = true;
         $this->currentTraceId = $traceId;
+        TraceFlowContext::set($traceId);
 
         return new TraceHandle(
             traceId: $traceId,
@@ -118,6 +120,7 @@ class TraceFlowSDK
 
             // Update context
             $this->currentTraceId = $traceId;
+            TraceFlowContext::set($traceId);
 
             error_log("[TraceFlow] Retrieved trace: {$traceId}");
         } catch (\Exception $e) {
@@ -139,15 +142,25 @@ class TraceFlowSDK
      */
     public function getCurrentTrace(): ?TraceHandle
     {
-        if (! $this->currentTraceId) {
+        $traceId = $this->currentTraceId ?? TraceFlowContext::currentTraceId();
+
+        if (! $traceId) {
             return null;
         }
 
         return new TraceHandle(
-            traceId: $this->currentTraceId,
+            traceId: $traceId,
             source: $this->source,
             sendEvent: $this->sendEvent(...),
         );
+    }
+
+    /**
+     * Set the current trace ID (used by queue middleware to restore context).
+     */
+    public function setCurrentTraceId(string $traceId): void
+    {
+        $this->currentTraceId = $traceId;
     }
 
     /**

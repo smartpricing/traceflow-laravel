@@ -14,6 +14,7 @@ use Smartness\TraceFlow\Handles\TraceHandle;
  * @method static void heartbeat(?string $traceId = null)
  * @method static StepHandle|null startStep(?string $name = null, ?string $stepType = null, mixed $input = null, ?array $metadata = null)
  * @method static void log(string $message, string $level = 'INFO', ?string $eventType = null, mixed $details = null)
+ * @method static void setCurrentTraceId(string $traceId)
  * @method static void flush()
  * @method static void shutdown()
  *

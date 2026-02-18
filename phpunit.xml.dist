@@ -22,12 +22,12 @@
         <env name="APP_ENV" value="testing"/>
         <!--
             For local testing, copy this file to phpunit.xml and configure:
-            - TRACEFLOW_ENDPOINT: Your local TraceFlow server endpoint
+            - TRACEFLOW_URL: Your local TraceFlow server endpoint
             - TRACEFLOW_API_KEY: Your development API key
 
             IMPORTANT: phpunit.xml is git-ignored to prevent credential leaks
         -->
-        <env name="TRACEFLOW_ENDPOINT" value="http://localhost:3009"/>
+        <env name="TRACEFLOW_URL" value="http://localhost:3009"/>
         <env name="TRACEFLOW_API_KEY" value="your-test-api-key-here"/>
     </php>
     <source>

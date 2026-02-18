@@ -37,7 +37,7 @@ Thank you for considering contributing to the TraceFlow Laravel SDK! This docume
    cp phpunit.xml.dist phpunit.xml
 
    # Edit phpunit.xml and set your test credentials:
-   # - TRACEFLOW_ENDPOINT: Your local TraceFlow server (e.g., http://localhost:3009)
+   # - TRACEFLOW_URL: Your local TraceFlow server (e.g., http://localhost:3009)
    # - TRACEFLOW_API_KEY: Your development API key
    ```
 

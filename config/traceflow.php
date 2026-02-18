@@ -34,10 +34,6 @@ return [
 
     'api_key' => env('TRACEFLOW_API_KEY'),
 
-    'username' => env('TRACEFLOW_USERNAME'),
-
-    'password' => env('TRACEFLOW_PASSWORD'),
-
     'timeout' => env('TRACEFLOW_TIMEOUT', 5.0),
 
     /*

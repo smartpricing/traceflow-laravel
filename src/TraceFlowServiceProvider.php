@@ -24,8 +24,6 @@ class TraceFlowServiceProvider extends ServiceProvider
                 'endpoint' => config('traceflow.endpoint'),
                 'async_http' => config('traceflow.async_http'),
                 'api_key' => config('traceflow.api_key'),
-                'username' => config('traceflow.username'),
-                'password' => config('traceflow.password'),
                 'timeout' => config('traceflow.timeout'),
                 'max_retries' => config('traceflow.max_retries'),
                 'retry_delay' => config('traceflow.retry_delay'),

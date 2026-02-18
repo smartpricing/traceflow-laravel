@@ -505,8 +505,6 @@ return [
     'source' => env('APP_NAME'),
     'endpoint' => 'http://localhost:3009',  // env: TRACEFLOW_URL
     'api_key' => 'your-api-key',
-    'username' => 'user',
-    'password' => 'pass',
     'timeout' => 5.0,
     'max_retries' => 3,
     'retry_delay' => 1000,

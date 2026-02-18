@@ -32,9 +32,6 @@ class HttpTransport implements TransportInterface
 
         if (isset($config['api_key'])) {
             $headers['X-API-Key'] = $config['api_key'];
-        } elseif (isset($config['username']) && isset($config['password'])) {
-            $auth = base64_encode($config['username'].':'.$config['password']);
-            $headers['Authorization'] = 'Basic '.$auth;
         }
 
         $this->client = new Client([

@@ -73,13 +73,15 @@
             "@format:check",
             "@analyse",
             "@test:coverage"
-        ]
+        ],
+        "test:connectivity": "php scripts/test-connectivity.php"
     },
     "scripts-descriptions": {
         "test": "Run all test suites (unit + feature)",
         "test:unit": "Run unit tests only",
         "test:feature": "Run feature/integration tests only",
         "test:coverage": "Generate HTML and text coverage reports",
+        "test:connectivity": "Test real connectivity against a TraceFlow service (requires TRACEFLOW_URL and TRACEFLOW_API_KEY)",
         "analyse": "Run PHPStan static analysis",
         "format": "Format code using Laravel Pint",
         "format:check": "Check code formatting without making changes",

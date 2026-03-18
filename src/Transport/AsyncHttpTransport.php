@@ -32,8 +32,6 @@ class AsyncHttpTransport implements TransportInterface
     /** @var PromiseInterface[] */
     private array $promises = [];
 
-    private int $eventCount = 0;
-
     public function __construct(array $config)
     {
         $this->endpoint = $config['endpoint'];
@@ -205,7 +203,6 @@ class AsyncHttpTransport implements TransportInterface
                 // Success callback
                 function ($response) {
                     // Request succeeded, nothing to do
-                    $this->eventCount++;
                 },
                 // Failure callback with retry logic
                 function (GuzzleException $exception) use ($method, $uri, $data, $attempt) {
@@ -245,11 +242,8 @@ class AsyncHttpTransport implements TransportInterface
             // Wait for all promises to settle
             Utils::settle($this->promises)->wait();
 
-            error_log("[TraceFlow Async] Flushed {$this->eventCount} events successfully");
-
             // Clear promises array
             $this->promises = [];
-            $this->eventCount = 0;
         } catch (\Exception $e) {
             if ($this->silentErrors) {
                 error_log("[TraceFlow Async] Error during flush (silenced): {$e->getMessage()}");
@@ -264,7 +258,6 @@ class AsyncHttpTransport implements TransportInterface
      */
     public function shutdown()
     {
-        error_log('[TraceFlow Async] Shutting down async transport...');
         $this->flush();
     }
 }

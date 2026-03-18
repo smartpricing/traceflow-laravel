@@ -23,8 +23,6 @@ class TraceFlowSDK
 
     private bool $silentErrors;
 
-    private array $activeTraces = [];
-
     private ?string $currentTraceId = null; // Simple context storage
 
     public function __construct(array $config)
@@ -91,8 +89,6 @@ class TraceFlowSDK
 
         $this->sendEvent($event);
 
-        // Track trace
-        $this->activeTraces[$traceId] = true;
         $this->currentTraceId = $traceId;
         TraceFlowContext::set($traceId);
 
@@ -116,13 +112,12 @@ class TraceFlowSDK
 
         try {
             $client = new Client(['base_uri' => $this->endpoint]);
-            $response = $client->get("/api/v1/traces/{$traceId}/state");
+            $client->get("/api/v1/traces/{$traceId}/state");
 
             // Update context
             $this->currentTraceId = $traceId;
             TraceFlowContext::set($traceId);
 
-            error_log("[TraceFlow] Retrieved trace: {$traceId}");
         } catch (\Exception $e) {
             if (! $this->silentErrors) {
                 throw $e;
@@ -195,10 +190,11 @@ class TraceFlowSDK
         try {
             $client = new Client(['base_uri' => $this->endpoint]);
             $client->post("/api/v1/traces/{$targetTraceId}/heartbeat");
-            error_log("[TraceFlow] Heartbeat sent for: {$targetTraceId}");
         } catch (\Exception $e) {
-            if (! $this->silentErrors) {
+            if ($this->silentErrors) {
                 error_log("[TraceFlow] Heartbeat error: {$e->getMessage()}");
+            } else {
+                throw $e;
             }
         }
     }
@@ -268,7 +264,6 @@ class TraceFlowSDK
      */
     public function shutdown(): void
     {
-        error_log('[TraceFlow] Shutting down SDK...');
         $this->transport->shutdown();
     }
 }

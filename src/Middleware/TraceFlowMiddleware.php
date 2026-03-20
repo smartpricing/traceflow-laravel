@@ -45,9 +45,6 @@ class TraceFlowMiddleware
             );
         }
 
-        // Set static context so any class can access the trace
-        TraceFlowContext::set($traceId);
-
         // Store trace ID in request
         $request->attributes->set('trace_id', $traceId);
         $request->attributes->set('trace', $trace);

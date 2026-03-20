@@ -129,12 +129,12 @@ class TraceHandle
             traceId: $this->traceId,
             timestamp: now()->toIso8601String(),
             source: $this->source,
-            payload: [
+            payload: array_filter([
                 'message' => $message,
                 'level' => $level instanceof LogLevel ? $level->value : $level,
                 'event_type' => $eventType,
                 'details' => $details,
-            ],
+            ]),
         );
 
         ($this->sendEvent)($event);

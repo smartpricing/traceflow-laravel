@@ -23,19 +23,21 @@ class TraceFlowSDK
 
     private bool $silentErrors;
 
-    private ?string $currentTraceId = null; // Simple context storage
+    private ?string $apiKey;
+
+    private float $timeout;
 
     public function __construct(array $config)
     {
         $this->source = $config['source'];
         $this->endpoint = $config['endpoint'] ?? null;
         $this->silentErrors = $config['silent_errors'] ?? true;
+        $this->apiKey = $config['api_key'] ?? null;
+        $this->timeout = (float) ($config['timeout'] ?? 5.0);
 
-        // Initialize transport
         $transportType = $config['transport'] ?? 'http';
 
         if ($transportType === 'http') {
-            // Use async transport by default for better performance
             $useAsync = $config['async_http'] ?? true;
 
             if ($useAsync) {
@@ -67,7 +69,6 @@ class TraceFlowSDK
     ): TraceHandle {
         $traceId = $traceId ?? Uuid::uuid4()->toString();
 
-        // Create trace started event
         $event = new TraceEvent(
             eventId: Uuid::uuid4()->toString(),
             eventType: TraceEventType::TRACE_STARTED,
@@ -88,8 +89,6 @@ class TraceFlowSDK
         );
 
         $this->sendEvent($event);
-
-        $this->currentTraceId = $traceId;
         TraceFlowContext::set($traceId);
 
         return new TraceHandle(
@@ -111,13 +110,8 @@ class TraceFlowSDK
         }
 
         try {
-            $client = new Client(['base_uri' => $this->endpoint]);
-            $client->get("/api/v1/traces/{$traceId}/state");
-
-            // Update context
-            $this->currentTraceId = $traceId;
+            $this->makeHttpClient()->get("/api/v1/traces/{$traceId}/state");
             TraceFlowContext::set($traceId);
-
         } catch (\Exception $e) {
             if (! $this->silentErrors) {
                 throw $e;
@@ -137,7 +131,7 @@ class TraceFlowSDK
      */
     public function getCurrentTrace(): ?TraceHandle
     {
-        $traceId = $this->currentTraceId ?? TraceFlowContext::currentTraceId();
+        $traceId = TraceFlowContext::currentTraceId();
 
         if (! $traceId) {
             return null;
@@ -148,14 +142,6 @@ class TraceFlowSDK
             source: $this->source,
             sendEvent: $this->sendEvent(...),
         );
-    }
-
-    /**
-     * Set the current trace ID (used by queue middleware to restore context).
-     */
-    public function setCurrentTraceId(string $traceId): void
-    {
-        $this->currentTraceId = $traceId;
     }
 
     /**
@@ -181,15 +167,14 @@ class TraceFlowSDK
      */
     public function heartbeat(?string $traceId = null): void
     {
-        $targetTraceId = $traceId ?? $this->currentTraceId;
+        $targetTraceId = $traceId ?? TraceFlowContext::currentTraceId();
 
         if (! $targetTraceId || ! $this->endpoint) {
             return;
         }
 
         try {
-            $client = new Client(['base_uri' => $this->endpoint]);
-            $client->post("/api/v1/traces/{$targetTraceId}/heartbeat");
+            $this->makeHttpClient()->post("/api/v1/traces/{$targetTraceId}/heartbeat");
         } catch (\Exception $e) {
             if ($this->silentErrors) {
                 error_log("[TraceFlow] Heartbeat error: {$e->getMessage()}");
@@ -236,22 +221,6 @@ class TraceFlowSDK
     }
 
     /**
-     * Send event through transport
-     */
-    private function sendEvent(TraceEvent $event): void
-    {
-        try {
-            $this->transport->send($event);
-        } catch (\Exception $e) {
-            if ($this->silentErrors) {
-                error_log("[TraceFlow] Error sending event (silenced): {$e->getMessage()}");
-            } else {
-                throw $e;
-            }
-        }
-    }
-
-    /**
      * Flush pending events
      */
     public function flush(): void
@@ -265,5 +234,33 @@ class TraceFlowSDK
     public function shutdown(): void
     {
         $this->transport->shutdown();
+    }
+
+    private function sendEvent(TraceEvent $event): void
+    {
+        try {
+            $this->transport->send($event);
+        } catch (\Exception $e) {
+            if ($this->silentErrors) {
+                error_log("[TraceFlow] Error sending event (silenced): {$e->getMessage()}");
+            } else {
+                throw $e;
+            }
+        }
+    }
+
+    private function makeHttpClient(): Client
+    {
+        $headers = ['Content-Type' => 'application/json'];
+
+        if ($this->apiKey) {
+            $headers['X-API-Key'] = $this->apiKey;
+        }
+
+        return new Client([
+            'base_uri' => $this->endpoint,
+            'headers' => $headers,
+            'timeout' => $this->timeout,
+        ]);
     }
 }

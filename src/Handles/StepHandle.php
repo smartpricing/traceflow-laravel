@@ -81,12 +81,12 @@ class StepHandle
             traceId: $this->traceId,
             timestamp: now()->toIso8601String(),
             source: $this->source,
-            payload: [
+            payload: array_filter([
                 'message' => $message,
                 'level' => $level instanceof LogLevel ? $level->value : $level,
                 'event_type' => $eventType,
                 'details' => $details,
-            ],
+            ]),
             stepId: $this->stepId,
         );
 

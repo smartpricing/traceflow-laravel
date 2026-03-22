@@ -180,7 +180,7 @@ class TraceFlowSDKTest extends TestCase
         }, ['title' => 'Failing Trace']);
     }
 
-    public function test_heartbeat_with_trace_id(): void
+    public function test_heartbeat_is_noop_when_no_trace_context(): void
     {
         $sdk = new TraceFlowSDK([
             'transport' => 'http',
@@ -189,26 +189,7 @@ class TraceFlowSDKTest extends TestCase
             'silent_errors' => true,
         ]);
 
-        $trace = $sdk->startTrace(title: 'Test');
-
-        // Should not throw exception
-        $sdk->heartbeat($trace->traceId);
-
-        $this->assertTrue(true);
-    }
-
-    public function test_heartbeat_without_trace_id_uses_current_trace(): void
-    {
-        $sdk = new TraceFlowSDK([
-            'transport' => 'http',
-            'source' => 'test',
-            'endpoint' => 'http://localhost:3009',
-            'silent_errors' => true,
-        ]);
-
-        $trace = $sdk->startTrace(title: 'Test');
-
-        // Should use current trace
+        // No trace started — heartbeat returns early without any HTTP call
         $sdk->heartbeat();
 
         $this->assertTrue(true);

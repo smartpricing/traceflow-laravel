@@ -55,7 +55,7 @@ class TraceFlowMiddleware
 
             $statusCode = $response->getStatusCode();
 
-            if ($statusCode >= 400) {
+            if ($statusCode >= 500) {
                 $trace->fail("HTTP {$statusCode}");
             } else {
                 $trace->finish([

@@ -30,9 +30,6 @@ class TraceFlowSDK
     /** @var array<string, TraceHandle> */
     private array $activeTraces = [];
 
-    /** @var array<string, StepHandle> */
-    private array $activeSteps = [];
-
     public function __construct(array $config)
     {
         $this->source = $config['source'];
@@ -102,6 +99,9 @@ class TraceFlowSDK
             source: $this->source,
             sendEvent: $this->sendEvent(...),
             ownsLifecycle: true,
+            onClose: function () use ($traceId) {
+                unset($this->activeTraces[$traceId]);
+            },
         );
 
         $this->activeTraces[$traceId] = $handle;
@@ -212,11 +212,7 @@ class TraceFlowSDK
             return null;
         }
 
-        $step = $trace->startStep($name, $stepType, $input, $metadata);
-
-        $this->activeSteps[$step->stepId] = $step;
-
-        return $step;
+        return $trace->startStep($name, $stepType, $input, $metadata);
     }
 
     /**
@@ -253,22 +249,11 @@ class TraceFlowSDK
     }
 
     /**
-     * Close all active steps and traces that were not explicitly closed.
+     * Close all active traces that were not explicitly closed.
+     * Each trace cascades to close its own orphaned steps via closeOrphanedSteps().
      */
     private function closeAllActive(): void
     {
-        // Close steps first (must be closed before their parent traces)
-        foreach ($this->activeSteps as $step) {
-            if (! $step->isClosed()) {
-                try {
-                    $step->fail('Process shutting down');
-                } catch (\Throwable) {}
-            }
-        }
-
-        $this->activeSteps = [];
-
-        // Then close traces
         foreach ($this->activeTraces as $trace) {
             if (! $trace->isClosed()) {
                 try {

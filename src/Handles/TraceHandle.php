@@ -19,6 +19,7 @@ class TraceHandle
         private string $source,
         private \Closure $sendEvent,
         private bool $ownsLifecycle = false,
+        private ?\Closure $onClose = null,
     ) {}
 
     public function __destruct()
@@ -46,6 +47,7 @@ class TraceHandle
         $this->closeOrphanedSteps('Parent trace finished');
 
         $this->closed = true;
+        $this->notifyClosed();
 
         $event = new TraceEvent(
             eventId: Uuid::uuid4()->toString(),
@@ -75,6 +77,7 @@ class TraceHandle
         $this->closeOrphanedSteps($errorMessage);
 
         $this->closed = true;
+        $this->notifyClosed();
 
         $errorStack = $error instanceof \Throwable ? $error->getTraceAsString() : null;
 
@@ -104,6 +107,7 @@ class TraceHandle
         $this->closeOrphanedSteps('Parent trace cancelled');
 
         $this->closed = true;
+        $this->notifyClosed();
 
         $event = new TraceEvent(
             eventId: Uuid::uuid4()->toString(),
@@ -164,7 +168,7 @@ class TraceHandle
 
         try {
             $result = $fn($step);
-            $step->finish(is_array($result) ? $result : null);
+            $step->finish($result);
 
             return $result;
         } catch (\Throwable $e) {
@@ -192,6 +196,13 @@ class TraceHandle
         ($this->sendEvent)($event);
     }
 
+    private function notifyClosed(): void
+    {
+        if ($this->onClose !== null) {
+            ($this->onClose)();
+        }
+    }
+
     private function closeOrphanedSteps(string $reason): void
     {
         foreach ($this->steps as $step) {
@@ -201,5 +212,7 @@ class TraceHandle
                 } catch (\Throwable) {}
             }
         }
+
+        $this->steps = [];
     }
 }

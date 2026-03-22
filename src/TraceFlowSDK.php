@@ -27,6 +27,12 @@ class TraceFlowSDK
 
     private float $timeout;
 
+    /** @var array<string, TraceHandle> */
+    private array $activeTraces = [];
+
+    /** @var array<string, StepHandle> */
+    private array $activeSteps = [];
+
     public function __construct(array $config)
     {
         $this->source = $config['source'];
@@ -91,11 +97,16 @@ class TraceFlowSDK
         $this->sendEvent($event);
         TraceFlowContext::set($traceId);
 
-        return new TraceHandle(
+        $handle = new TraceHandle(
             traceId: $traceId,
             source: $this->source,
             sendEvent: $this->sendEvent(...),
+            ownsLifecycle: true,
         );
+
+        $this->activeTraces[$traceId] = $handle;
+
+        return $handle;
     }
 
     /**
@@ -201,7 +212,11 @@ class TraceFlowSDK
             return null;
         }
 
-        return $trace->startStep($name, $stepType, $input, $metadata);
+        $step = $trace->startStep($name, $stepType, $input, $metadata);
+
+        $this->activeSteps[$step->stepId] = $step;
+
+        return $step;
     }
 
     /**
@@ -229,11 +244,40 @@ class TraceFlowSDK
     }
 
     /**
-     * Shutdown SDK
+     * Shutdown SDK — close all active handles, then flush transport.
      */
     public function shutdown(): void
     {
+        $this->closeAllActive();
         $this->transport->shutdown();
+    }
+
+    /**
+     * Close all active steps and traces that were not explicitly closed.
+     */
+    private function closeAllActive(): void
+    {
+        // Close steps first (must be closed before their parent traces)
+        foreach ($this->activeSteps as $step) {
+            if (! $step->isClosed()) {
+                try {
+                    $step->fail('Process shutting down');
+                } catch (\Throwable) {}
+            }
+        }
+
+        $this->activeSteps = [];
+
+        // Then close traces
+        foreach ($this->activeTraces as $trace) {
+            if (! $trace->isClosed()) {
+                try {
+                    $trace->fail('Process shutting down');
+                } catch (\Throwable) {}
+            }
+        }
+
+        $this->activeTraces = [];
     }
 
     private function sendEvent(TraceEvent $event): void

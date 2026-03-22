@@ -18,6 +18,20 @@ class StepHandle
         private \Closure $sendEvent,
     ) {}
 
+    public function __destruct()
+    {
+        if (! $this->closed) {
+            try {
+                $this->fail('Step not explicitly closed (auto-closed by destructor)');
+            } catch (\Throwable) {}
+        }
+    }
+
+    public function isClosed(): bool
+    {
+        return $this->closed;
+    }
+
     public function finish(mixed $output = null, ?array $metadata = null): void
     {
         if ($this->closed) {

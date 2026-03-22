@@ -50,7 +50,7 @@ class TraceFlowServiceProvider extends ServiceProvider
             $this->commands([TestCommand::class]);
         }
 
-        // Register shutdown handler to flush async events
+        // Register shutdown handler to close active handles and flush async events
         $this->app->terminating(function () {
             $sdk = $this->app->make(TraceFlowSDK::class);
             $sdk->shutdown();

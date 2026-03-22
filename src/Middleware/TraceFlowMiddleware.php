@@ -53,10 +53,15 @@ class TraceFlowMiddleware
         try {
             $response = $next($request);
 
-            // Success
-            $trace->finish([
-                'status_code' => $response->getStatusCode(),
-            ]);
+            $statusCode = $response->getStatusCode();
+
+            if ($statusCode >= 400) {
+                $trace->fail("HTTP {$statusCode}");
+            } else {
+                $trace->finish([
+                    'status_code' => $statusCode,
+                ]);
+            }
 
             // Add trace ID to response headers
             $response->headers->set($headerName, $traceId);

@@ -9,15 +9,15 @@ interface TransportInterface
     /**
      * Send event to transport
      */
-    public function send(TraceEvent $event);
+    public function send(TraceEvent $event): void;
 
     /**
      * Flush any pending events
      */
-    public function flush();
+    public function flush(): void;
 
     /**
      * Shutdown transport gracefully
      */
-    public function shutdown();
+    public function shutdown(): void;
 }

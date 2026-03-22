@@ -11,11 +11,29 @@ class TraceHandle
 {
     private bool $closed = false;
 
+    /** @var StepHandle[] */
+    private array $steps = [];
+
     public function __construct(
         public readonly string $traceId,
         private string $source,
         private \Closure $sendEvent,
+        private bool $ownsLifecycle = false,
     ) {}
+
+    public function __destruct()
+    {
+        if ($this->ownsLifecycle && ! $this->closed) {
+            try {
+                $this->fail('Trace not explicitly closed (auto-closed by destructor)');
+            } catch (\Throwable) {}
+        }
+    }
+
+    public function isClosed(): bool
+    {
+        return $this->closed;
+    }
 
     public function finish(?array $result = null, ?array $metadata = null): void
     {
@@ -24,6 +42,8 @@ class TraceHandle
 
             return;
         }
+
+        $this->closeOrphanedSteps('Parent trace finished');
 
         $this->closed = true;
 
@@ -50,9 +70,12 @@ class TraceHandle
             return;
         }
 
+        $errorMessage = $error instanceof \Throwable ? $error->getMessage() : $error;
+
+        $this->closeOrphanedSteps($errorMessage);
+
         $this->closed = true;
 
-        $errorMessage = $error instanceof \Throwable ? $error->getMessage() : $error;
         $errorStack = $error instanceof \Throwable ? $error->getTraceAsString() : null;
 
         $event = new TraceEvent(
@@ -77,6 +100,8 @@ class TraceHandle
 
             return;
         }
+
+        $this->closeOrphanedSteps('Parent trace cancelled');
 
         $this->closed = true;
 
@@ -113,12 +138,39 @@ class TraceHandle
 
         ($this->sendEvent)($event);
 
-        return new StepHandle(
+        $step = new StepHandle(
             stepId: $stepId,
             traceId: $this->traceId,
             source: $this->source,
             sendEvent: $this->sendEvent,
         );
+
+        $this->steps[] = $step;
+
+        return $step;
+    }
+
+    /**
+     * Execute a callback within a step, guaranteeing the step is closed.
+     */
+    public function withStep(
+        callable $fn,
+        ?string $name = null,
+        ?string $stepType = null,
+        mixed $input = null,
+        ?array $metadata = null,
+    ): mixed {
+        $step = $this->startStep($name, $stepType, $input, $metadata);
+
+        try {
+            $result = $fn($step);
+            $step->finish(is_array($result) ? $result : null);
+
+            return $result;
+        } catch (\Throwable $e) {
+            $step->fail($e);
+            throw $e;
+        }
     }
 
     public function log(string $message, LogLevel|string $level = LogLevel::INFO, ?string $eventType = null, mixed $details = null): void
@@ -138,5 +190,16 @@ class TraceHandle
         );
 
         ($this->sendEvent)($event);
+    }
+
+    private function closeOrphanedSteps(string $reason): void
+    {
+        foreach ($this->steps as $step) {
+            if (! $step->isClosed()) {
+                try {
+                    $step->fail($reason);
+                } catch (\Throwable) {}
+            }
+        }
     }
 }

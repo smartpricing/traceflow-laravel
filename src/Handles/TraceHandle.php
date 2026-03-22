@@ -53,7 +53,7 @@ class TraceHandle
             eventId: Uuid::uuid4()->toString(),
             eventType: TraceEventType::TRACE_FINISHED,
             traceId: $this->traceId,
-            timestamp: now()->toIso8601String(),
+            timestamp: now()->format('Y-m-d\TH:i:s.v\Z'),
             source: $this->source,
             payload: array_filter([
                 'result' => $result,
@@ -85,7 +85,7 @@ class TraceHandle
             eventId: Uuid::uuid4()->toString(),
             eventType: TraceEventType::TRACE_FAILED,
             traceId: $this->traceId,
-            timestamp: now()->toIso8601String(),
+            timestamp: now()->format('Y-m-d\TH:i:s.v\Z'),
             source: $this->source,
             payload: array_filter([
                 'error' => $errorMessage,
@@ -113,7 +113,7 @@ class TraceHandle
             eventId: Uuid::uuid4()->toString(),
             eventType: TraceEventType::TRACE_CANCELLED,
             traceId: $this->traceId,
-            timestamp: now()->toIso8601String(),
+            timestamp: now()->format('Y-m-d\TH:i:s.v\Z'),
             source: $this->source,
             payload: [],
         );
@@ -129,7 +129,7 @@ class TraceHandle
             eventId: Uuid::uuid4()->toString(),
             eventType: TraceEventType::STEP_STARTED,
             traceId: $this->traceId,
-            timestamp: now()->toIso8601String(),
+            timestamp: now()->format('Y-m-d\TH:i:s.v\Z'),
             source: $this->source,
             payload: array_filter([
                 'name' => $name,
@@ -183,7 +183,7 @@ class TraceHandle
             eventId: Uuid::uuid4()->toString(),
             eventType: TraceEventType::LOG_EMITTED,
             traceId: $this->traceId,
-            timestamp: now()->toIso8601String(),
+            timestamp: now()->format('Y-m-d\TH:i:s.v\Z'),
             source: $this->source,
             payload: array_filter([
                 'message' => $message,

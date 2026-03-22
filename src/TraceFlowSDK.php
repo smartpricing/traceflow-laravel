@@ -76,7 +76,7 @@ class TraceFlowSDK
             eventId: Uuid::uuid4()->toString(),
             eventType: TraceEventType::TRACE_STARTED,
             traceId: $traceId,
-            timestamp: now()->toIso8601String(),
+            timestamp: now()->format('Y-m-d\TH:i:s.v\Z'),
             source: $this->source,
             payload: array_filter([
                 'trace_type' => $traceType,

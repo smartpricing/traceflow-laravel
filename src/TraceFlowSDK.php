@@ -76,7 +76,7 @@ class TraceFlowSDK
             eventId: Uuid::uuid4()->toString(),
             eventType: TraceEventType::TRACE_STARTED,
             traceId: $traceId,
-            timestamp: now()->format('Y-m-d\TH:i:s.v\Z'),
+            timestamp: now('UTC')->format('Y-m-d\TH:i:s.v\Z'),
             source: $this->source,
             payload: array_filter([
                 'trace_type' => $traceType,
@@ -88,7 +88,7 @@ class TraceFlowSDK
                 'params' => $params,
                 'trace_timeout_ms' => $traceTimeoutMs,
                 'step_timeout_ms' => $stepTimeoutMs,
-            ]),
+            ], fn ($value) => $value !== null),
         );
 
         $this->sendEvent($event);
@@ -164,7 +164,7 @@ class TraceFlowSDK
 
         try {
             $result = $callback($trace);
-            $trace->finish(['result' => $result]);
+            $trace->finish($result);
 
             return $result;
         } catch (\Throwable $e) {

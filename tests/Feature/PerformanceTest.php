@@ -156,8 +156,8 @@ class PerformanceTest extends TestCase
 
         $memoryAfterFlush = memory_get_usage();
 
-        // Memory should be reasonable
-        $this->assertLessThan(10 * 1024 * 1024, $memoryIncrease, 'Memory increase should be < 10MB');
+        // Memory should be reasonable (25MB allows for pending async promises when backend is offline)
+        $this->assertLessThan(25 * 1024 * 1024, $memoryIncrease, 'Memory increase should be < 25MB');
 
         echo "\nMemory increase: " . round($memoryIncrease / 1024 / 1024, 2) . " MB\n";
         echo "Memory after flush: " . round($memoryAfterFlush / 1024 / 1024, 2) . " MB\n";

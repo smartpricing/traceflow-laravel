@@ -3,6 +3,7 @@
 namespace Smartness\TraceFlow\Handles;
 
 use Ramsey\Uuid\Uuid;
+use Smartness\TraceFlow\Context\TraceFlowContext;
 use Smartness\TraceFlow\DTO\TraceEvent;
 use Smartness\TraceFlow\Enums\LogLevel;
 use Smartness\TraceFlow\Enums\TraceEventType;
@@ -36,7 +37,7 @@ class TraceHandle
         return $this->closed;
     }
 
-    public function finish(?array $result = null, ?array $metadata = null): void
+    public function finish(mixed $result = null, ?array $metadata = null): void
     {
         if ($this->closed) {
             error_log("[TraceFlow] Trace {$this->traceId} already closed");
@@ -53,12 +54,12 @@ class TraceHandle
             eventId: Uuid::uuid4()->toString(),
             eventType: TraceEventType::TRACE_FINISHED,
             traceId: $this->traceId,
-            timestamp: now()->format('Y-m-d\TH:i:s.v\Z'),
+            timestamp: now('UTC')->format('Y-m-d\TH:i:s.v\Z'),
             source: $this->source,
             payload: array_filter([
                 'result' => $result,
                 'metadata' => $metadata,
-            ]),
+            ], fn ($value) => $value !== null),
         );
 
         ($this->sendEvent)($event);
@@ -85,12 +86,12 @@ class TraceHandle
             eventId: Uuid::uuid4()->toString(),
             eventType: TraceEventType::TRACE_FAILED,
             traceId: $this->traceId,
-            timestamp: now()->format('Y-m-d\TH:i:s.v\Z'),
+            timestamp: now('UTC')->format('Y-m-d\TH:i:s.v\Z'),
             source: $this->source,
             payload: array_filter([
                 'error' => $errorMessage,
                 'stack' => $errorStack,
-            ]),
+            ], fn ($value) => $value !== null),
         );
 
         ($this->sendEvent)($event);
@@ -113,7 +114,7 @@ class TraceHandle
             eventId: Uuid::uuid4()->toString(),
             eventType: TraceEventType::TRACE_CANCELLED,
             traceId: $this->traceId,
-            timestamp: now()->format('Y-m-d\TH:i:s.v\Z'),
+            timestamp: now('UTC')->format('Y-m-d\TH:i:s.v\Z'),
             source: $this->source,
             payload: [],
         );
@@ -129,14 +130,14 @@ class TraceHandle
             eventId: Uuid::uuid4()->toString(),
             eventType: TraceEventType::STEP_STARTED,
             traceId: $this->traceId,
-            timestamp: now()->format('Y-m-d\TH:i:s.v\Z'),
+            timestamp: now('UTC')->format('Y-m-d\TH:i:s.v\Z'),
             source: $this->source,
             payload: array_filter([
                 'name' => $name,
                 'step_type' => $stepType,
                 'input' => $input,
                 'metadata' => $metadata,
-            ]),
+            ], fn ($value) => $value !== null),
             stepId: $stepId,
         );
 
@@ -183,14 +184,14 @@ class TraceHandle
             eventId: Uuid::uuid4()->toString(),
             eventType: TraceEventType::LOG_EMITTED,
             traceId: $this->traceId,
-            timestamp: now()->format('Y-m-d\TH:i:s.v\Z'),
+            timestamp: now('UTC')->format('Y-m-d\TH:i:s.v\Z'),
             source: $this->source,
             payload: array_filter([
                 'message' => $message,
                 'level' => $level instanceof LogLevel ? $level->value : $level,
                 'event_type' => $eventType,
                 'details' => $details,
-            ]),
+            ], fn ($value) => $value !== null),
         );
 
         ($this->sendEvent)($event);
@@ -200,6 +201,11 @@ class TraceHandle
     {
         if ($this->onClose !== null) {
             ($this->onClose)();
+        }
+
+        // Clear static context if this trace is still the active one
+        if (TraceFlowContext::currentTraceId() === $this->traceId) {
+            TraceFlowContext::clear();
         }
     }
 

@@ -20,12 +20,28 @@ abstract class AbstractHttpTransport implements TransportInterface
 
     protected int $retryDelay;
 
+    // Circuit breaker state
+    private int $failureCount = 0;
+
+    private bool $circuitOpen = false;
+
+    private int $circuitOpenUntil = 0;
+
+    private int $circuitBreakerThreshold;
+
+    private int $circuitBreakerTimeoutMs;
+
+    /** @var TraceEvent[] */
+    protected array $eventQueue = [];
+
     public function __construct(array $config)
     {
         $this->endpoint = $config['endpoint'];
         $this->silentErrors = $config['silent_errors'] ?? true;
         $this->maxRetries = $config['max_retries'] ?? 3;
         $this->retryDelay = $config['retry_delay'] ?? 1000;
+        $this->circuitBreakerThreshold = $config['circuit_breaker_threshold'] ?? 5;
+        $this->circuitBreakerTimeoutMs = $config['circuit_breaker_timeout_ms'] ?? 60000;
 
         $headers = ['Content-Type' => 'application/json'];
 
@@ -47,6 +63,13 @@ abstract class AbstractHttpTransport implements TransportInterface
 
     public function send(TraceEvent $event): void
     {
+        if ($this->isCircuitOpen()) {
+            $this->eventQueue[] = $event;
+            error_log($this->logPrefix()." Circuit open, queued event: {$event->eventType->value} (".count($this->eventQueue)." pending)");
+
+            return;
+        }
+
         try {
             match ($event->eventType) {
                 TraceEventType::TRACE_STARTED => $this->createTrace($event),
@@ -59,12 +82,54 @@ abstract class AbstractHttpTransport implements TransportInterface
                 TraceEventType::LOG_EMITTED => $this->createLog($event),
                 default => null,
             };
+            // Reset on success
+            $this->failureCount = 0;
         } catch (\Exception $e) {
             if ($this->silentErrors) {
                 error_log($this->logPrefix()." Error sending event (silenced): {$e->getMessage()}");
             } else {
                 throw $e;
             }
+        }
+    }
+
+    protected function recordFailure(): void
+    {
+        if ($this->circuitOpen) {
+            return;
+        }
+
+        $this->failureCount++;
+        if ($this->failureCount >= $this->circuitBreakerThreshold) {
+            $this->circuitOpen = true;
+            $this->circuitOpenUntil = (int) (microtime(true) * 1000) + $this->circuitBreakerTimeoutMs;
+            error_log($this->logPrefix()." Circuit breaker opened for {$this->circuitBreakerTimeoutMs}ms");
+        }
+    }
+
+    private function isCircuitOpen(): bool
+    {
+        if ($this->circuitOpen && (int) (microtime(true) * 1000) > $this->circuitOpenUntil) {
+            $this->circuitOpen = false;
+            $this->failureCount = 0;
+            error_log($this->logPrefix().' Circuit breaker closed, resuming requests');
+            $this->drainQueue();
+        }
+
+        return $this->circuitOpen;
+    }
+
+    protected function drainQueue(): void
+    {
+        if (empty($this->eventQueue)) {
+            return;
+        }
+
+        $queued = $this->eventQueue;
+        $this->eventQueue = [];
+
+        foreach ($queued as $event) {
+            $this->send($event);
         }
     }
 

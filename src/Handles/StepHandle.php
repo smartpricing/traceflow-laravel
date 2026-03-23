@@ -46,12 +46,12 @@ class StepHandle
             eventId: Uuid::uuid4()->toString(),
             eventType: TraceEventType::STEP_FINISHED,
             traceId: $this->traceId,
-            timestamp: now()->format('Y-m-d\TH:i:s.v\Z'),
+            timestamp: now('UTC')->format('Y-m-d\TH:i:s.v\Z'),
             source: $this->source,
             payload: array_filter([
                 'output' => $output,
                 'metadata' => $metadata,
-            ]),
+            ], fn ($value) => $value !== null),
             stepId: $this->stepId,
         );
 
@@ -75,12 +75,12 @@ class StepHandle
             eventId: Uuid::uuid4()->toString(),
             eventType: TraceEventType::STEP_FAILED,
             traceId: $this->traceId,
-            timestamp: now()->format('Y-m-d\TH:i:s.v\Z'),
+            timestamp: now('UTC')->format('Y-m-d\TH:i:s.v\Z'),
             source: $this->source,
             payload: array_filter([
                 'error' => $errorMessage,
                 'stack' => $errorStack,
-            ]),
+            ], fn ($value) => $value !== null),
             stepId: $this->stepId,
         );
 
@@ -93,14 +93,14 @@ class StepHandle
             eventId: Uuid::uuid4()->toString(),
             eventType: TraceEventType::LOG_EMITTED,
             traceId: $this->traceId,
-            timestamp: now()->format('Y-m-d\TH:i:s.v\Z'),
+            timestamp: now('UTC')->format('Y-m-d\TH:i:s.v\Z'),
             source: $this->source,
             payload: array_filter([
                 'message' => $message,
                 'level' => $level instanceof LogLevel ? $level->value : $level,
                 'event_type' => $eventType,
                 'details' => $details,
-            ]),
+            ], fn ($value) => $value !== null),
             stepId: $this->stepId,
         );
 

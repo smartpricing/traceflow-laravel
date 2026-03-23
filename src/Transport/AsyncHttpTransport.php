@@ -48,6 +48,7 @@ class AsyncHttpTransport extends AbstractHttpTransport
                         // Schedule retry without blocking — the flush() loop will pick up the new promise
                         $this->executeAsync($method, $uri, $data, $attempt + 1);
                     } else {
+                        $this->recordFailure();
                         if ($this->silentErrors) {
                             error_log($this->logPrefix()." Failed after {$this->maxRetries} retries: {$exception->getMessage()}");
                         } else {
@@ -79,6 +80,8 @@ class AsyncHttpTransport extends AbstractHttpTransport
                 }
             }
         }
+
+        $this->drainQueue();
     }
 
     public function shutdown(): void

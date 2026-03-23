@@ -25,6 +25,7 @@ class HttpTransport extends AbstractHttpTransport
                 usleep($this->retryDelay * 1000 * (int) pow(2, $attempt));
                 $this->executeWithRetry($method, $uri, $data, $attempt + 1);
             } else {
+                $this->recordFailure();
                 throw $e;
             }
         }
@@ -32,11 +33,11 @@ class HttpTransport extends AbstractHttpTransport
 
     public function flush(): void
     {
-        // HTTP is synchronous, nothing to flush
+        $this->drainQueue();
     }
 
     public function shutdown(): void
     {
-        // Nothing to cleanup
+        $this->drainQueue();
     }
 }

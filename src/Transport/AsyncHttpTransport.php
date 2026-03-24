@@ -45,7 +45,10 @@ class AsyncHttpTransport extends AbstractHttpTransport
                 },
                 function (GuzzleException $exception) use ($method, $uri, $data, $attempt) {
                     if ($attempt < $this->maxRetries) {
-                        // Schedule retry without blocking — the flush() loop will pick up the new promise
+                        // Intentionally no delay between async retries: sleeping inside a promise
+                        // rejection handler would block the event loop. The flush() while-loop
+                        // naturally adds a small gap between retry batches. retry_delay config
+                        // applies only to the synchronous HttpTransport.
                         $this->executeAsync($method, $uri, $data, $attempt + 1);
                     } else {
                         $this->recordFailure();

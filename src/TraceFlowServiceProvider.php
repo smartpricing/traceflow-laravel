@@ -28,6 +28,8 @@ class TraceFlowServiceProvider extends ServiceProvider
                 'max_retries' => config('traceflow.max_retries'),
                 'retry_delay' => config('traceflow.retry_delay'),
                 'silent_errors' => config('traceflow.silent_errors'),
+                'circuit_breaker_threshold' => config('traceflow.circuit_breaker_threshold'),
+                'circuit_breaker_timeout_ms' => config('traceflow.circuit_breaker_timeout_ms'),
             ]);
         });
 
@@ -50,10 +52,21 @@ class TraceFlowServiceProvider extends ServiceProvider
             $this->commands([TestCommand::class]);
         }
 
-        // Register shutdown handler to close active handles and flush async events
+        // Register shutdown handler to close active handles and flush async events.
+        // app->terminating() handles graceful Laravel shutdown.
+        // register_shutdown_function() catches exit(), fatal errors, and other abrupt terminations.
         $this->app->terminating(function () {
             $sdk = $this->app->make(TraceFlowSDK::class);
             $sdk->shutdown();
+        });
+
+        register_shutdown_function(function () {
+            try {
+                $sdk = $this->app->make(TraceFlowSDK::class);
+                $sdk->flush();
+            } catch (\Throwable $e) {
+                // Best-effort: never throw from a shutdown function
+            }
         });
     }
 }

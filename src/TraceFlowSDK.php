@@ -32,6 +32,10 @@ class TraceFlowSDK
 
     public function __construct(array $config)
     {
+        if (empty($config['source'])) {
+            throw new \InvalidArgumentException('TraceFlow: "source" config key is required');
+        }
+
         $this->source = $config['source'];
         $this->endpoint = $config['endpoint'] ?? null;
         $this->silentErrors = $config['silent_errors'] ?? true;
@@ -204,13 +208,17 @@ class TraceFlowSDK
         mixed $input = null,
         ?array $metadata = null
     ): ?StepHandle {
-        $trace = $this->getCurrentTrace();
+        $traceId = TraceFlowContext::currentTraceId();
 
-        if (! $trace) {
+        if (! $traceId) {
             error_log('[TraceFlow] No active trace context for step');
 
             return null;
         }
+
+        // Prefer the owned handle so the step is tracked for orphan cleanup on shutdown.
+        // Fall back to a floating handle for traces started externally (e.g. via getTrace).
+        $trace = $this->activeTraces[$traceId] ?? $this->getCurrentTrace();
 
         return $trace->startStep($name, $stepType, $input, $metadata);
     }

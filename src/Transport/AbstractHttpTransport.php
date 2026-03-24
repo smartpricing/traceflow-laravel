@@ -173,6 +173,7 @@ abstract class AbstractHttpTransport implements TransportInterface
             'last_activity_at' => $event->timestamp,
             'result' => $event->payload['result'] ?? null,
             'error' => $event->payload['error'] ?? null,
+            'stack' => $event->payload['stack'] ?? null,
             'metadata' => $event->payload['metadata'] ?? null,
         ], fn ($value) => $value !== null);
 

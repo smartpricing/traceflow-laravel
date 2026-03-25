@@ -21,6 +21,7 @@ class TraceHandle
         private \Closure $sendEvent,
         private bool $ownsLifecycle = false,
         private ?\Closure $onClose = null,
+        private ?\Closure $flushEvents = null,
     ) {}
 
     public function __destruct()
@@ -46,6 +47,7 @@ class TraceHandle
         }
 
         $this->closeOrphanedSteps('Parent trace finished');
+        $this->flushPendingEvents();
 
         $this->closed = true;
         $this->notifyClosed();
@@ -76,6 +78,7 @@ class TraceHandle
         $errorMessage = $error instanceof \Throwable ? $error->getMessage() : $error;
 
         $this->closeOrphanedSteps($errorMessage);
+        $this->flushPendingEvents();
 
         $this->closed = true;
         $this->notifyClosed();
@@ -106,6 +109,7 @@ class TraceHandle
         }
 
         $this->closeOrphanedSteps('Parent trace cancelled');
+        $this->flushPendingEvents();
 
         $this->closed = true;
         $this->notifyClosed();
@@ -206,6 +210,19 @@ class TraceHandle
         // Clear static context if this trace is still the active one
         if (TraceFlowContext::currentTraceId() === $this->traceId) {
             TraceFlowContext::clear();
+        }
+    }
+
+    /**
+     * Flush all pending async events so that step closure events reach the
+     * backend before the trace completion event is dispatched.
+     */
+    private function flushPendingEvents(): void
+    {
+        if ($this->flushEvents !== null) {
+            try {
+                ($this->flushEvents)();
+            } catch (\Throwable) {}
         }
     }
 

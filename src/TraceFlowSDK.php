@@ -106,6 +106,7 @@ class TraceFlowSDK
             onClose: function () use ($traceId) {
                 unset($this->activeTraces[$traceId]);
             },
+            flushEvents: fn () => $this->transport->flush(),
         );
 
         $this->activeTraces[$traceId] = $handle;
@@ -121,7 +122,12 @@ class TraceFlowSDK
         if (! $this->endpoint) {
             error_log('[TraceFlow] getTrace() requires HTTP transport with endpoint');
 
-            return new TraceHandle($traceId, $this->source, $this->sendEvent(...));
+            return new TraceHandle(
+                traceId: $traceId,
+                source: $this->source,
+                sendEvent: $this->sendEvent(...),
+                flushEvents: fn () => $this->transport->flush(),
+            );
         }
 
         try {
@@ -138,6 +144,7 @@ class TraceFlowSDK
             traceId: $traceId,
             source: $this->source,
             sendEvent: $this->sendEvent(...),
+            flushEvents: fn () => $this->transport->flush(),
         );
     }
 

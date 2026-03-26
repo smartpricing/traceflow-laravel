@@ -154,7 +154,7 @@ abstract class AbstractHttpTransport implements TransportInterface
             'step_timeout_ms' => $event->payload['step_timeout_ms'] ?? null,
         ], fn ($value) => $value !== null);
 
-        $this->dispatch('POST', '/api/v1/traces', $payload);
+        $this->dispatchSafe('POST', '/api/v1/traces', $payload);
     }
 
     private function updateTrace(TraceEvent $event): void
@@ -177,7 +177,7 @@ abstract class AbstractHttpTransport implements TransportInterface
             'metadata' => $event->payload['metadata'] ?? null,
         ], fn ($value) => $value !== null);
 
-        $this->dispatch('PATCH', "/api/v1/traces/{$event->traceId}", $payload);
+        $this->dispatchSafe('PATCH', "/api/v1/traces/{$event->traceId}", $payload);
     }
 
     private function createStep(TraceEvent $event): void
@@ -194,7 +194,7 @@ abstract class AbstractHttpTransport implements TransportInterface
             'metadata' => $event->payload['metadata'] ?? null,
         ], fn ($value) => $value !== null);
 
-        $this->dispatch('POST', '/api/v1/steps', $payload);
+        $this->dispatchSafe('POST', '/api/v1/steps', $payload);
     }
 
     private function updateStep(TraceEvent $event): void
@@ -212,7 +212,7 @@ abstract class AbstractHttpTransport implements TransportInterface
             'metadata' => $event->payload['metadata'] ?? null,
         ], fn ($value) => $value !== null);
 
-        $this->dispatch('PATCH', "/api/v1/steps/{$event->traceId}/{$event->stepId}", $payload);
+        $this->dispatchSafe('PATCH', "/api/v1/steps/{$event->traceId}/{$event->stepId}", $payload);
     }
 
     private function createLog(TraceEvent $event): void
@@ -228,7 +228,79 @@ abstract class AbstractHttpTransport implements TransportInterface
             'event_type' => $event->payload['event_type'] ?? null,
         ], fn ($value) => $value !== null);
 
-        $this->dispatch('POST', '/api/v1/logs', $payload);
+        $this->dispatchSafe('POST', '/api/v1/logs', $payload);
+    }
+
+    /**
+     * Sanitize the payload and delegate to dispatch.
+     */
+    private function dispatchSafe(string $method, string $uri, array $payload): void
+    {
+        $this->dispatch($method, $uri, $this->sanitizePayload($payload));
+    }
+
+    /**
+     * Recursively sanitize a payload so it is safe for json_encode.
+     * Closures, resources, and non-serializable objects are replaced
+     * with descriptive string placeholders instead of crashing.
+     */
+    protected function sanitizePayload(mixed $value, int $depth = 0): mixed
+    {
+        if ($depth > 64) {
+            return '[max depth reached]';
+        }
+
+        if ($value === null || is_scalar($value)) {
+            return $value;
+        }
+
+        if ($value instanceof \Closure) {
+            return '[Closure]';
+        }
+
+        if (is_resource($value)) {
+            return '[resource:' . get_resource_type($value) . ']';
+        }
+
+        if (is_array($value)) {
+            $sanitized = [];
+            foreach ($value as $k => $v) {
+                $sanitized[$k] = $this->sanitizePayload($v, $depth + 1);
+            }
+
+            return $sanitized;
+        }
+
+        if (is_object($value)) {
+            if ($value instanceof \JsonSerializable) {
+                try {
+                    return $this->sanitizePayload($value->jsonSerialize(), $depth + 1);
+                } catch (\Throwable) {
+                    return '[' . get_class($value) . ': serialization failed]';
+                }
+            }
+
+            if ($value instanceof \Stringable) {
+                try {
+                    return (string) $value;
+                } catch (\Throwable) {
+                    return '[' . get_class($value) . ': __toString failed]';
+                }
+            }
+
+            if ($value instanceof \UnitEnum) {
+                return $value instanceof \BackedEnum ? $value->value : $value->name;
+            }
+
+            // Last resort: try to convert to array
+            try {
+                return $this->sanitizePayload((array) $value, $depth + 1);
+            } catch (\Throwable) {
+                return '[' . get_class($value) . ']';
+            }
+        }
+
+        return '[unknown type: ' . gettype($value) . ']';
     }
 
     abstract protected function dispatch(string $method, string $uri, array $payload): void;

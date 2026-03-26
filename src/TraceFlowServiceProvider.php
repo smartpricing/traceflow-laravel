@@ -3,6 +3,7 @@
 namespace Smartness\TraceFlow;
 
 use Illuminate\Support\ServiceProvider;
+use Smartness\TraceFlow\Console\BattleTestCommand;
 use Smartness\TraceFlow\Console\TestCommand;
 
 class TraceFlowServiceProvider extends ServiceProvider
@@ -49,7 +50,7 @@ class TraceFlowServiceProvider extends ServiceProvider
             ], 'traceflow-config');
 
             // Register commands
-            $this->commands([TestCommand::class]);
+            $this->commands([TestCommand::class, BattleTestCommand::class]);
         }
 
         // Register shutdown handler to close active handles and flush async events.

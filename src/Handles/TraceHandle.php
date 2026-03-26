@@ -67,7 +67,7 @@ class TraceHandle
         ($this->sendEvent)($event);
     }
 
-    public function fail(string|\Throwable $error): void
+    public function fail(string|\Throwable $error, mixed $result = null, ?array $metadata = null): void
     {
         if ($this->closed) {
             error_log("[TraceFlow] Trace {$this->traceId} already closed");
@@ -94,6 +94,8 @@ class TraceHandle
             payload: array_filter([
                 'error' => $errorMessage,
                 'stack' => $errorStack,
+                'result' => $result,
+                'metadata' => $metadata,
             ], fn ($value) => $value !== null),
         );
 

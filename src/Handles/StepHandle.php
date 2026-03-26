@@ -58,7 +58,7 @@ class StepHandle
         ($this->sendEvent)($event);
     }
 
-    public function fail(string|\Throwable $error): void
+    public function fail(string|\Throwable $error, mixed $output = null, ?array $metadata = null): void
     {
         if ($this->closed) {
             error_log("[TraceFlow] Step {$this->stepId} already closed");
@@ -80,6 +80,8 @@ class StepHandle
             payload: array_filter([
                 'error' => $errorMessage,
                 'stack' => $errorStack,
+                'output' => $output,
+                'metadata' => $metadata,
             ], fn ($value) => $value !== null),
             stepId: $this->stepId,
         );

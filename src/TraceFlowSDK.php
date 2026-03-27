@@ -15,6 +15,20 @@ use Smartness\TraceFlow\Transport\TransportInterface;
 
 class TraceFlowSDK
 {
+    private const UUID_REGEX = '/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i';
+
+    private static function ensureValidUuid(?string $value, string $fieldName): string
+    {
+        if ($value === null || ! preg_match(self::UUID_REGEX, $value)) {
+            $replacement = Uuid::uuid4()->toString();
+            if ($value !== null) {
+                error_log("[TraceFlow] Invalid UUID for \"{$fieldName}\": \"{$value}\" — replaced with \"{$replacement}\"");
+            }
+            return $replacement;
+        }
+        return $value;
+    }
+
     private TransportInterface $transport;
 
     private string $source;
@@ -74,7 +88,7 @@ class TraceFlowSDK
         ?int $traceTimeoutMs = null,
         ?int $stepTimeoutMs = null,
     ): TraceHandle {
-        $traceId = $traceId ?? Uuid::uuid4()->toString();
+        $traceId = self::ensureValidUuid($traceId, 'trace_id');
 
         $event = new TraceEvent(
             eventId: Uuid::uuid4()->toString(),
@@ -119,6 +133,8 @@ class TraceFlowSDK
      */
     public function getTrace(string $traceId): TraceHandle
     {
+        $traceId = self::ensureValidUuid($traceId, 'trace_id');
+
         if (! $this->endpoint) {
             error_log('[TraceFlow] getTrace() requires HTTP transport with endpoint');
 
@@ -189,7 +205,9 @@ class TraceFlowSDK
      */
     public function heartbeat(?string $traceId = null): void
     {
-        $targetTraceId = $traceId ?? TraceFlowContext::currentTraceId();
+        $targetTraceId = $traceId !== null
+            ? self::ensureValidUuid($traceId, 'trace_id')
+            : TraceFlowContext::currentTraceId();
 
         if (! $targetTraceId || ! $this->endpoint) {
             return;

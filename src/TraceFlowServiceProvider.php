@@ -31,6 +31,8 @@ class TraceFlowServiceProvider extends ServiceProvider
                 'silent_errors' => config('traceflow.silent_errors'),
                 'circuit_breaker_threshold' => config('traceflow.circuit_breaker_threshold'),
                 'circuit_breaker_timeout_ms' => config('traceflow.circuit_breaker_timeout_ms'),
+                'log_channel' => config('traceflow.log_channel'),
+                'log_level' => config('traceflow.log_level'),
             ]);
         });
 

@@ -6,7 +6,8 @@ return [
     | Transport Configuration
     |--------------------------------------------------------------------------
     |
-    | Choose between 'http' or 'kafka' transport
+    | Choose between 'http', 'log', or 'kafka' transport.
+    | 'log' writes all trace events to the Laravel log file.
     |
     */
     'transport' => env('TRACEFLOW_TRANSPORT', 'http'),
@@ -51,6 +52,19 @@ return [
     |--------------------------------------------------------------------------
     */
     'silent_errors' => env('TRACEFLOW_SILENT_ERRORS', true),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Log Transport Options
+    |--------------------------------------------------------------------------
+    |
+    | Used when transport is set to 'log'.
+    | Events are written to the specified Laravel log channel.
+    |
+    */
+    'log_channel' => env('TRACEFLOW_LOG_CHANNEL', env('LOG_CHANNEL', 'stack')),
+
+    'log_level' => env('TRACEFLOW_LOG_LEVEL', 'info'),
 
     /*
     |--------------------------------------------------------------------------

@@ -32,7 +32,7 @@ TraceFlow SDK for Laravel provides enterprise-grade distributed tracing capabili
 
 - 📦 **Stateless Architecture** - No Redis, no databases, pure event streaming
 - ⚡ **Non-Blocking Performance** - Async HTTP transport with <2ms overhead per event
-- 🔀 **Transport Agnostic** - Use HTTP REST API or Kafka with identical API
+- 🔀 **Transport Agnostic** - Use HTTP REST API, Log file, or Kafka with identical API
 - 🧵 **Context-Aware** - Automatic context propagation across service boundaries
 - 🔄 **Retry Logic** - Built-in exponential backoff and circuit breaker patterns
 - 🛡️ **Production-Ready** - Silent error mode ensures tracing never fails your application
@@ -60,7 +60,7 @@ php artisan vendor:publish --tag=traceflow-config
 Configure in `.env`:
 
 ```env
-TRACEFLOW_TRANSPORT=http
+TRACEFLOW_TRANSPORT=http          # http, log, or kafka
 TRACEFLOW_SOURCE=my-laravel-app
 TRACEFLOW_URL=http://localhost:3009
 TRACEFLOW_API_KEY=your-api-key
@@ -72,6 +72,10 @@ TRACEFLOW_SILENT_ERRORS=true
 
 # Performance (Async HTTP enabled by default)
 TRACEFLOW_ASYNC_HTTP=true
+
+# Log transport options (used when TRACEFLOW_TRANSPORT=log)
+TRACEFLOW_LOG_CHANNEL=stack       # Laravel log channel (default: LOG_CHANNEL)
+TRACEFLOW_LOG_LEVEL=info          # Log level: debug, info, warning, error, etc.
 
 # Queue context propagation (enabled by default)
 TRACEFLOW_QUEUE_PROPAGATE=true
@@ -500,7 +504,7 @@ class UserControllerTest extends TestCase
 ```php
 // config/traceflow.php
 return [
-    'transport' => 'http',                    // or 'kafka'
+    'transport' => 'http',                    // 'http', 'log', or 'kafka'
     'async_http' => true,                     // Use async HTTP (default: true)
     'source' => env('APP_NAME'),
     'endpoint' => 'http://localhost:3009',  // env: TRACEFLOW_URL
@@ -509,6 +513,10 @@ return [
     'max_retries' => 3,
     'retry_delay' => 1000,
     'silent_errors' => true,
+
+    // Log transport
+    'log_channel' => 'stack',                 // Laravel log channel
+    'log_level' => 'info',                    // Log level for trace events
 
     'middleware' => [
         'enabled' => true,
@@ -521,6 +529,56 @@ return [
 ];
 ```
 
+## 📝 Log Transport
+
+The **log transport** writes all trace events to Laravel's log system instead of sending them over HTTP. This is useful for:
+
+- **Local development** — inspect traces without running a TraceFlow server
+- **Debugging** — see the full event flow in your log files
+- **Environments without network access** — air-gapped or CI/CD pipelines
+- **Audit trails** — persist trace data alongside application logs
+
+### Setup
+
+```env
+TRACEFLOW_TRANSPORT=log
+TRACEFLOW_LOG_CHANNEL=stack   # any Laravel log channel (default: LOG_CHANNEL)
+TRACEFLOW_LOG_LEVEL=info      # debug, info, warning, error, etc.
+```
+
+### Log Output Example
+
+Each event is written as a structured log entry with a human-readable message and full context:
+
+```
+[2026-04-07 10:00:00] local.INFO: [TraceFlow] trace_started trace=abc-123 title="My Trace" type=api_request {"event_id":"...","event_type":"trace_started","trace_id":"abc-123",...}
+[2026-04-07 10:00:01] local.INFO: [TraceFlow] step_started trace=abc-123 step=step-1 name="Validate Input" type=validation {...}
+[2026-04-07 10:00:01] local.INFO: [TraceFlow] step_finished trace=abc-123 step=step-1 {...}
+[2026-04-07 10:00:02] local.INFO: [TraceFlow] trace_finished trace=abc-123 {...}
+```
+
+### Using a Dedicated Channel
+
+You can route trace events to a dedicated log file by configuring a custom channel in `config/logging.php`:
+
+```php
+// config/logging.php
+'channels' => [
+    'traceflow' => [
+        'driver' => 'single',
+        'path' => storage_path('logs/traceflow.log'),
+        'level' => 'debug',
+    ],
+],
+```
+
+```env
+TRACEFLOW_TRANSPORT=log
+TRACEFLOW_LOG_CHANNEL=traceflow
+```
+
+> **Note:** The log transport has zero external dependencies and no performance overhead beyond normal log writes. The API is identical to the HTTP transport — switch between them by changing a single env variable.
+
 ## ⚡ Performance & Async Transport
 
 **By default, the SDK uses non-blocking async HTTP** for maximum performance:
@@ -531,6 +589,7 @@ return [
 |-----------|-------------------|----------|
 | **Async HTTP** (default) | **~2ms** | ❌ No |
 | Blocking HTTP | ~50-200ms | ✅ Yes |
+| **Log** | **<1ms** | ❌ No |
 
 ### How Async Works
 

@@ -11,6 +11,7 @@ use Smartness\TraceFlow\Handles\TraceHandle;
 use Smartness\TraceFlow\Context\TraceFlowContext;
 use Smartness\TraceFlow\Transport\AsyncHttpTransport;
 use Smartness\TraceFlow\Transport\HttpTransport;
+use Smartness\TraceFlow\Transport\LogTransport;
 use Smartness\TraceFlow\Transport\TransportInterface;
 
 class TraceFlowSDK
@@ -66,6 +67,8 @@ class TraceFlowSDK
             } else {
                 $this->transport = new HttpTransport($config);
             }
+        } elseif ($transportType === 'log') {
+            $this->transport = new LogTransport($config);
         } elseif ($transportType === 'kafka') {
             throw new \RuntimeException('Kafka transport not yet implemented for PHP');
         } else {

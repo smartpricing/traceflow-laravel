@@ -3,6 +3,20 @@
 return [
     /*
     |--------------------------------------------------------------------------
+    | Master Enable / Disable
+    |--------------------------------------------------------------------------
+    |
+    | When false, the SDK is wired with a no-op transport. All public methods
+    | keep working (so call sites need no `if (enabled)` guards) but events are
+    | dropped silently — no HTTP traffic and no AsyncHttpTransport circuit
+    | breaker `error_log()` noise. Useful in local development when the
+    | TraceFlow collector is not running.
+    |
+    */
+    'enabled' => env('TRACEFLOW_ENABLED', true),
+
+    /*
+    |--------------------------------------------------------------------------
     | Transport Configuration
     |--------------------------------------------------------------------------
     |

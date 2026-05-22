@@ -7,6 +7,7 @@ use Smartness\TraceFlow\Context\TraceFlowContext;
 use Smartness\TraceFlow\TraceFlowSDK;
 use Smartness\TraceFlow\Transport\AsyncHttpTransport;
 use Smartness\TraceFlow\Transport\HttpTransport;
+use Smartness\TraceFlow\Transport\NullTransport;
 
 class TraceFlowSDKTest extends TestCase
 {
@@ -34,6 +35,33 @@ class TraceFlowSDKTest extends TestCase
             $transport,
             'Should use AsyncHttpTransport by default'
         );
+    }
+
+    public function test_uses_null_transport_when_disabled(): void
+    {
+        $sdk = new TraceFlowSDK([
+            'enabled' => false,
+            'source' => 'test',
+        ]);
+
+        $reflection = new \ReflectionClass($sdk);
+        $transportProperty = $reflection->getProperty('transport');
+        $transport = $transportProperty->getValue($sdk);
+
+        $this->assertInstanceOf(
+            NullTransport::class,
+            $transport,
+            'Should use NullTransport when traceflow.enabled is false'
+        );
+    }
+
+    public function test_disabled_sdk_does_not_require_source(): void
+    {
+        // When disabled, the SDK skips the "source" requirement so it can be
+        // booted in environments where no TraceFlow config has been set up.
+        $sdk = new TraceFlowSDK(['enabled' => false]);
+
+        $this->assertNotNull($sdk);
     }
 
     public function test_uses_async_http_transport_when_explicitly_enabled(): void

@@ -79,6 +79,11 @@ TRACEFLOW_LOG_LEVEL=info          # Log level: debug, info, warning, error, etc.
 
 # Queue context propagation (enabled by default)
 TRACEFLOW_QUEUE_PROPAGATE=true
+
+# Master kill switch — set false in local/dev when the collector isn't running.
+# The SDK keeps its full public surface (no call-site changes) but events go to
+# a NullTransport: no HTTP, no circuit-breaker error_log spam.
+TRACEFLOW_ENABLED=true
 ```
 
 ## 🚀 Quick Start

@@ -12,6 +12,7 @@ use Smartness\TraceFlow\Context\TraceFlowContext;
 use Smartness\TraceFlow\Transport\AsyncHttpTransport;
 use Smartness\TraceFlow\Transport\HttpTransport;
 use Smartness\TraceFlow\Transport\LogTransport;
+use Smartness\TraceFlow\Transport\NullTransport;
 use Smartness\TraceFlow\Transport\TransportInterface;
 
 class TraceFlowSDK
@@ -47,15 +48,25 @@ class TraceFlowSDK
 
     public function __construct(array $config)
     {
-        if (empty($config['source'])) {
-            throw new \InvalidArgumentException('TraceFlow: "source" config key is required');
-        }
+        // Master kill switch. When false, the SDK keeps its full public surface
+        // (startTrace/startStep/finish/fail/log all keep working) but events go
+        // to a NullTransport — no HTTP, no error_log noise, no required config.
+        $enabled = $config['enabled'] ?? true;
 
-        $this->source = $config['source'];
+        $this->source = $config['source'] ?? 'disabled';
         $this->endpoint = $config['endpoint'] ?? null;
         $this->silentErrors = $config['silent_errors'] ?? true;
         $this->apiKey = $config['api_key'] ?? null;
         $this->timeout = (float) ($config['timeout'] ?? 5.0);
+
+        if ($enabled === false) {
+            $this->transport = new NullTransport();
+            return;
+        }
+
+        if (empty($config['source'])) {
+            throw new \InvalidArgumentException('TraceFlow: "source" config key is required');
+        }
 
         $transportType = $config['transport'] ?? 'http';
 

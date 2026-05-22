@@ -20,6 +20,7 @@ class TraceFlowServiceProvider extends ServiceProvider
         // Register SDK as singleton
         $this->app->singleton(TraceFlowSDK::class, function ($app) {
             return new TraceFlowSDK([
+                'enabled' => config('traceflow.enabled', true),
                 'transport' => config('traceflow.transport'),
                 'source' => config('traceflow.source'),
                 'endpoint' => config('traceflow.endpoint'),

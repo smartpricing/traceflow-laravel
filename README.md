@@ -4,7 +4,7 @@
 
 [![Packagist Version](https://img.shields.io/packagist/v/smartness/traceflow-laravel.svg)](https://packagist.org/packages/smartness/traceflow-laravel)
 [![PHP Version](https://img.shields.io/badge/PHP-8.1+-blue.svg)](https://www.php.net/)
-[![Laravel Version](https://img.shields.io/badge/Laravel-10%20%7C%2011-orange.svg)](https://laravel.com/)
+[![Laravel Version](https://img.shields.io/badge/Laravel-10%20%7C%2011%20%7C%2012%20%7C%2013-orange.svg)](https://laravel.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/Tests-Passing-brightgreen.svg)](tests/)
 

@@ -56,20 +56,33 @@ class AsyncHttpTransport extends AbstractHttpTransport
                         // Request succeeded
                     },
                     function (GuzzleException $exception) use ($method, $uri, $data, $orderKey, $attempt) {
-                        if ($attempt < $this->maxRetries) {
+                        // The entity already exists (e.g. a trace_id shared across
+                        // services). Resolve as success so the chain continues and
+                        // the circuit breaker is not tripped.
+                        if ($this->isBenignConflict($exception)) {
+                            return;
+                        }
+
+                        if ($this->isRetryable($exception) && $attempt < $this->maxRetries) {
                             // Intentionally no delay between async retries: sleeping inside a promise
                             // rejection handler would block the event loop. The flush() while-loop
                             // naturally adds a small gap between retry batches. retry_delay config
                             // applies only to the synchronous HttpTransport.
                             $this->executeAsync($method, $uri, $data, $orderKey, $attempt + 1);
-                        } else {
-                            $this->recordFailure();
-                            if ($this->silentErrors) {
-                                error_log($this->logPrefix()." Failed after {$this->maxRetries} retries: {$exception->getMessage()}");
-                            } else {
-                                throw $exception;
-                            }
+
+                            return;
                         }
+
+                        $this->recordFailure();
+
+                        if (! $this->silentErrors) {
+                            throw $exception;
+                        }
+
+                        // 4xx client errors are not retried, so don't claim they were.
+                        $this->isRetryable($exception)
+                            ? error_log($this->logPrefix()." Failed after {$this->maxRetries} retries: {$exception->getMessage()}")
+                            : error_log($this->logPrefix()." Request failed (not retried): {$exception->getMessage()}");
                     }
                 );
         };

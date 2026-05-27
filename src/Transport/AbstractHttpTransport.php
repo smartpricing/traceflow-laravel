@@ -3,6 +3,7 @@
 namespace Smartness\TraceFlow\Transport;
 
 use GuzzleHttp\Client;
+use GuzzleHttp\Exception\RequestException;
 use Smartness\TraceFlow\DTO\TraceEvent;
 use Smartness\TraceFlow\Enums\StepStatus;
 use Smartness\TraceFlow\Enums\TraceEventType;
@@ -306,6 +307,41 @@ abstract class AbstractHttpTransport implements TransportInterface
         }
 
         return '[unknown type: ' . gettype($value) . ']';
+    }
+
+    /**
+     * HTTP status code carried by an exception, or null for transport-level
+     * errors (connection refused, timeout, DNS) that have no response.
+     */
+    protected function statusCode(\Throwable $e): ?int
+    {
+        if ($e instanceof RequestException && $e->hasResponse()) {
+            return $e->getResponse()->getStatusCode();
+        }
+
+        return null;
+    }
+
+    /**
+     * Only network/transport errors and 5xx responses are worth retrying. 4xx
+     * client errors are deterministic — retrying a 404/409/422 just wastes
+     * attempts and spams logs, so they are not retried (matches the JS SDK).
+     */
+    protected function isRetryable(\Throwable $e): bool
+    {
+        $status = $this->statusCode($e);
+
+        return $status === null || $status >= 500;
+    }
+
+    /**
+     * A 409 Conflict on a create means the entity already exists. In distributed
+     * tracing a trace_id is propagated across services, so more than one service
+     * may try to create the same trace/step — that is expected, not an error.
+     */
+    protected function isBenignConflict(\Throwable $e): bool
+    {
+        return $this->statusCode($e) === 409;
     }
 
     abstract protected function dispatch(string $method, string $uri, array $payload, ?string $orderKey = null): void;

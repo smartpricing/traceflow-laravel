@@ -23,7 +23,13 @@ class HttpTransport extends AbstractHttpTransport
         try {
             $this->client->request($method, $uri, ['json' => $data]);
         } catch (GuzzleException $e) {
-            if ($attempt < $this->maxRetries) {
+            // The entity already exists (e.g. a trace_id shared across services).
+            // Treat as success — nothing to retry, nothing to fail.
+            if ($this->isBenignConflict($e)) {
+                return;
+            }
+
+            if ($attempt < $this->maxRetries && $this->isRetryable($e)) {
                 usleep($this->retryDelay * 1000 * (int) pow(2, $attempt));
                 $this->executeWithRetry($method, $uri, $data, $attempt + 1);
             } else {

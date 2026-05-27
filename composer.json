@@ -2,7 +2,7 @@
     "name": "smartness/traceflow-laravel",
     "description": "Production-ready distributed tracing SDK for Laravel with event-sourced architecture, async HTTP transport, and cross-service context propagation",
     "type": "library",
-    "version": "2.7.1",
+    "version": "2.7.2",
     "keywords": [
         "laravel",
         "tracing",

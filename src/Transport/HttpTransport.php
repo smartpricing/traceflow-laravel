@@ -6,8 +6,10 @@ use GuzzleHttp\Exception\GuzzleException;
 
 class HttpTransport extends AbstractHttpTransport
 {
-    protected function dispatch(string $method, string $uri, array $payload): void
+    protected function dispatch(string $method, string $uri, array $payload, ?string $orderKey = null): void
     {
+        // Synchronous transport blocks per request, so requests are already
+        // ordered by call order; $orderKey is not needed here.
         $this->executeWithRetry($method, $uri, $payload);
     }
 

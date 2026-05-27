@@ -154,7 +154,7 @@ abstract class AbstractHttpTransport implements TransportInterface
             'step_timeout_ms' => $event->payload['step_timeout_ms'] ?? null,
         ], fn ($value) => $value !== null);
 
-        $this->dispatchSafe('POST', '/api/v1/traces', $payload);
+        $this->dispatchSafe('POST', '/api/v1/traces', $payload, "trace:{$event->traceId}");
     }
 
     private function updateTrace(TraceEvent $event): void
@@ -177,7 +177,7 @@ abstract class AbstractHttpTransport implements TransportInterface
             'metadata' => $event->payload['metadata'] ?? null,
         ], fn ($value) => $value !== null);
 
-        $this->dispatchSafe('PATCH', "/api/v1/traces/{$event->traceId}", $payload);
+        $this->dispatchSafe('PATCH', "/api/v1/traces/{$event->traceId}", $payload, "trace:{$event->traceId}");
     }
 
     private function createStep(TraceEvent $event): void
@@ -194,7 +194,7 @@ abstract class AbstractHttpTransport implements TransportInterface
             'metadata' => $event->payload['metadata'] ?? null,
         ], fn ($value) => $value !== null);
 
-        $this->dispatchSafe('POST', '/api/v1/steps', $payload);
+        $this->dispatchSafe('POST', '/api/v1/steps', $payload, "step:{$event->traceId}:{$event->stepId}");
     }
 
     private function updateStep(TraceEvent $event): void
@@ -212,7 +212,7 @@ abstract class AbstractHttpTransport implements TransportInterface
             'metadata' => $event->payload['metadata'] ?? null,
         ], fn ($value) => $value !== null);
 
-        $this->dispatchSafe('PATCH', "/api/v1/steps/{$event->traceId}/{$event->stepId}", $payload);
+        $this->dispatchSafe('PATCH', "/api/v1/steps/{$event->traceId}/{$event->stepId}", $payload, "step:{$event->traceId}:{$event->stepId}");
     }
 
     private function createLog(TraceEvent $event): void
@@ -233,10 +233,15 @@ abstract class AbstractHttpTransport implements TransportInterface
 
     /**
      * Sanitize the payload and delegate to dispatch.
+     *
+     * $orderKey identifies the entity a request belongs to (e.g. a single step or
+     * trace). Transports that dispatch concurrently use it to serialize requests
+     * for the same entity so an update can never overtake its create. Independent
+     * entities (and logs, which pass null) still run concurrently.
      */
-    private function dispatchSafe(string $method, string $uri, array $payload): void
+    private function dispatchSafe(string $method, string $uri, array $payload, ?string $orderKey = null): void
     {
-        $this->dispatch($method, $uri, $this->sanitizePayload($payload));
+        $this->dispatch($method, $uri, $this->sanitizePayload($payload), $orderKey);
     }
 
     /**
@@ -303,7 +308,7 @@ abstract class AbstractHttpTransport implements TransportInterface
         return '[unknown type: ' . gettype($value) . ']';
     }
 
-    abstract protected function dispatch(string $method, string $uri, array $payload): void;
+    abstract protected function dispatch(string $method, string $uri, array $payload, ?string $orderKey = null): void;
 
     abstract protected function logPrefix(): string;
 }

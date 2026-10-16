@@ -17,6 +17,11 @@ use Smartness\TraceFlow\Transport\TransportInterface;
 
 class TraceFlowSDK
 {
+    /** Audit is synchronous and reports failures regardless of silent_errors. */
+    public function recordAudit(array $input): array
+    {
+        return $this->auditClient->recordAudit($input);
+    }
     private const UUID_REGEX = '/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i';
 
     private static function ensureValidUuid(?string $value, string $fieldName): string
@@ -32,6 +37,7 @@ class TraceFlowSDK
     }
 
     private TransportInterface $transport;
+    private \Smartness\TraceFlow\Audit\AuditClient $auditClient;
 
     private string $source;
 
@@ -48,6 +54,7 @@ class TraceFlowSDK
 
     public function __construct(array $config)
     {
+        $this->auditClient = new \Smartness\TraceFlow\Audit\AuditClient($config);
         // Master kill switch. When false, the SDK keeps its full public surface
         // (startTrace/startStep/finish/fail/log all keep working) but events go
         // to a NullTransport — no HTTP, no error_log noise, no required config.

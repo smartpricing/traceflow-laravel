@@ -5,6 +5,9 @@ namespace Smartness\TraceFlow;
 use Illuminate\Support\ServiceProvider;
 use Smartness\TraceFlow\Console\BattleTestCommand;
 use Smartness\TraceFlow\Console\TestCommand;
+use Smartness\TraceFlow\Console\PublishAuditCommand;
+use Smartness\TraceFlow\Audit\AuditClient;
+use Smartness\TraceFlow\Audit\AuditContext;
 
 class TraceFlowServiceProvider extends ServiceProvider
 {
@@ -16,6 +19,8 @@ class TraceFlowServiceProvider extends ServiceProvider
         $this->mergeConfigFrom(
             __DIR__.'/../config/traceflow.php', 'traceflow'
         );
+        $this->app->scoped(AuditContext::class, fn () => new AuditContext());
+        $this->app->singleton(AuditClient::class, fn () => new AuditClient(config('traceflow')));
 
         // Register SDK as singleton
         $this->app->singleton(TraceFlowSDK::class, function ($app) {
@@ -53,7 +58,10 @@ class TraceFlowServiceProvider extends ServiceProvider
             ], 'traceflow-config');
 
             // Register commands
-            $this->commands([TestCommand::class, BattleTestCommand::class]);
+            $this->commands([TestCommand::class, BattleTestCommand::class, PublishAuditCommand::class]);
+            $this->publishes([
+                __DIR__.'/../database/migrations/create_traceflow_audit_outbox.php.stub' => database_path('migrations/2026_10_16_000000_create_traceflow_audit_outbox.php'),
+            ], 'traceflow-audit-migrations');
         }
 
         // Register shutdown handler to close active handles and flush async events.

@@ -1,5 +1,122 @@
 # TraceFlow SDK for Laravel
 
+## Audit log
+
+Traceflow provides its own audit log through `LogsAudit` and the manual API.
+It captures Eloquent changes directly and does not require or integrate with Spatie.
+Configure the existing
+`traceflow.source`, `traceflow.endpoint` and `traceflow.api_key` settings.
+`AuditClient::record()` returns a durable persistence receipt or throws
+`AuditDeliveryException`, regardless of `silent_errors` or `async_http`.
+`TraceFlowSDK::recordAudit(array $input)` is also available for explicit direct sends.
+
+### Transactional model capture
+
+Publish and run the outbox migration on the **same database connection** as each
+audited model. No migration runs automatically on package installation.
+
+```sh
+php artisan vendor:publish --tag=traceflow-audit-migrations
+php artisan migrate
+```
+
+```php
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\DB;
+use Smartness\TraceFlow\Audit\AuditContext;
+use Smartness\TraceFlow\Audit\LogsAudit;
+
+class Quote extends Model
+{
+    use LogsAudit;
+
+    public function auditType(): string { return 'quote'; }
+    public function auditFields(): array { return ['status', 'total']; }
+}
+
+app(AuditContext::class)->run([
+    'actor' => ['type' => 'user', 'id' => '42'],
+    'origin' => ['channel' => 'mobile_app', 'client_source' => 'mobile-app'],
+    'metadata' => ['reason' => 'Discount agreed'],
+], fn () => DB::transaction(fn () => $quote->update(['total' => '420.00'])));
+```
+
+The trait requires an explicit transaction **before** saving/deleting/restoring.
+The outbox insertion uses the model's connection; rollback removes both writes.
+Create/update/delete/restore are captured, unchanged selected fields are omitted,
+and images are frozen before a later publisher runs. `auditFields()` is an explicit
+allowlist; override `customizeAudit(array $event): array` for safe enrichment or
+redaction. The authenticated actor is resolved at capture time unless supplied in
+the scoped context. `AuditContext::run()` restores its previous context on success
+or exception. Propagate trusted context explicitly into queued jobs.
+
+Schedule or invoke the publisher in the integrating application:
+
+```sh
+php artisan traceflow:audit-publish --limit=100
+# For a named database containing an outbox:
+php artisan traceflow:audit-publish --connection=business --limit=100
+```
+
+The publisher removes a row only after a `persisted` receipt. Transient failures
+keep the same envelope and schedule bounded backoff. Permanent errors retain the
+row with `failed_at` and a non-sensitive error summary for operator review. After
+correcting configuration, clear `failed_at` and reset `available_at` to retry; a
+conflicting payload needs investigation, not a new ID hiding the conflict.
+Concurrent publishers may send duplicates, which the backend deduplicates.
+Disabling delivery retains pending events for retry, without false success.
+
+Bulk updates/deletes, raw SQL, pivot operations and muted Eloquent events need
+explicit capture; installing a trait does not audit every database write. Use
+`AuditClient::createEvent()` and `AuditOutbox::record($event, $connection)` inside
+the same transaction for those flows. The application owns concurrency/locking
+needed to obtain the actual before/after images. Do not reload a mutable model in
+the publisher to reconstruct a past change.
+
+### Generic events
+
+```php
+use Illuminate\Support\Facades\DB;
+use Smartness\TraceFlow\Audit\AuditClient;
+use Smartness\TraceFlow\Audit\AuditEvent;
+use Smartness\TraceFlow\Audit\AuditOutbox;
+
+$event = app(AuditClient::class)->createEvent([
+    'subject' => ['type' => 'custom_object', 'id' => '12345'],
+    'action' => 'updated',
+    'changes' => AuditEvent::diff(['note' => null, 'enabled' => false], ['enabled' => true]),
+    'metadata' => ['reason' => 'Manual operation'],
+]);
+// Inside the transaction that performs the business change:
+app(AuditOutbox::class)->record($event, DB::connection());
+// Direct-send alternative, without an atomic delivery guarantee:
+// app(AuditClient::class)->record($event);
+```
+
+Types and IDs are strings, including UUIDs. Images preserve null versus missing
+keys; use decimal strings for exact monetary values. Custom activities can omit
+changes; creation uses an empty before object, deletion an empty after object.
+Context belongs in metadata rather than duplicated unchanged fields.
+
+### Replacing an existing activity log
+
+Adopt `LogsAudit` on models and use the manual API for custom activities and writes
+that bypass Eloquent events. The outbox is a delivery queue, not a second activity
+log: delivered entries are removed, and history is queried from Traceflow.
+
+Move existing log readers to Traceflow as part of application adoption. JSON
+searches, engagement metrics and business restore actions need explicit migration
+decisions; switching the writer alone does not replace them. Historical import
+is separate work. Preserve existing field allowlists and redaction rules.
+
+Audit tests (no application databases):
+
+```sh
+vendor/bin/phpunit tests/Unit/AuditTest.php tests/Unit/AuditOutboxTest.php
+# Optional compatibility smoke test using installed framework classes only:
+php tests/audit-installed-framework-smoke.php /path/to/installed/vendor
+```
+
 > **📦 Packagist Package:** This package is automatically synchronized to [`smartpricing/traceflow-laravel`](https://github.com/smartpricing/traceflow-laravel) for Packagist distribution. Install via Composer from the split repository.
 
 [![Packagist Version](https://img.shields.io/packagist/v/smartness/traceflow-laravel.svg)](https://packagist.org/packages/smartness/traceflow-laravel)

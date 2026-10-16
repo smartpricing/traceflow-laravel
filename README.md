@@ -1,79 +1,124 @@
-# TraceFlow SDK for Laravel
+# Traceflow SDK for Laravel
 
-## Audit log
+Laravel client for traces, steps, logs and audit events. Audit logging uses the
+SDK's `LogsAudit` trait or manual API, with no Spatie dependency or integration.
 
-Traceflow provides its own audit log through `LogsAudit` and the manual API.
-It captures Eloquent changes directly and does not require or integrate with Spatie.
-Configure the existing
-`traceflow.source`, `traceflow.endpoint` and `traceflow.api_key` settings.
-`AuditClient::record()` returns a durable persistence receipt or throws
-`AuditDeliveryException`, regardless of `silent_errors` or `async_http`.
-`TraceFlowSDK::recordAudit(array $input)` is also available for explicit direct sends.
+## Install and configure
 
-### Transactional model capture
+```sh
+composer require smartness/traceflow-laravel
+php artisan vendor:publish --tag=traceflow-config
+```
 
-Publish and run the outbox migration on the **same database connection** as each
-audited model. No migration runs automatically on package installation.
+Composer constraints support PHP 8.1+ and Laravel 10–13; the selected Laravel
+version also imposes its own PHP requirement. Laravel discovers the service
+provider automatically. The package is distributed from the
+[split repository](https://github.com/smartpricing/traceflow-laravel).
+
+Set these values in the application's `.env`:
+
+```dotenv
+TRACEFLOW_SOURCE=booking-api
+TRACEFLOW_URL=http://localhost:3009
+TRACEFLOW_API_KEY=your-api-key-here
+TRACEFLOW_TRANSPORT=http
+```
+
+The URL is the service base URL, without `/api/v1`. Use a key accepted by the
+backend and a distinct source for each environment sharing its storage.
+See [config/traceflow.php](config/traceflow.php) for all settings.
+
+## Audit model changes
+
+Deploy the backend audit API and apply its CQL schema first. Publish the outbox
+migration and run it on the same database connection as the audited models:
 
 ```sh
 php artisan vendor:publish --tag=traceflow-audit-migrations
 php artisan migrate
 ```
 
+For a named connection, use `php artisan migrate --database=business`. No migration
+runs automatically when the package is installed.
+
+Add `LogsAudit` and an explicit field allowlist to a model:
+
 ```php
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Support\Facades\DB;
-use Smartness\TraceFlow\Audit\AuditContext;
 use Smartness\TraceFlow\Audit\LogsAudit;
 
 class Quote extends Model
 {
     use LogsAudit;
 
-    public function auditType(): string { return 'quote'; }
-    public function auditFields(): array { return ['status', 'total']; }
+    public function auditType(): string
+    {
+        return 'quote';
+    }
+
+    public function auditFields(): array
+    {
+        return ['status', 'total'];
+    }
 }
+```
+
+For this model on the default connection, update it inside a transaction:
+
+```php
+use Illuminate\Support\Facades\DB;
+use Smartness\TraceFlow\Audit\AuditContext;
 
 app(AuditContext::class)->run([
     'actor' => ['type' => 'user', 'id' => '42'],
     'origin' => ['channel' => 'mobile_app', 'client_source' => 'mobile-app'],
     'metadata' => ['reason' => 'Discount agreed'],
-], fn () => DB::transaction(fn () => $quote->update(['total' => '420.00'])));
+], function () {
+    DB::transaction(function () {
+        $quote = Quote::query()->lockForUpdate()->findOrFail('12345');
+        $quote->total = '420.00';
+        $quote->save();
+    });
+});
 ```
 
-The trait requires an explicit transaction **before** saving/deleting/restoring.
-The outbox insertion uses the model's connection; rollback removes both writes.
-Create/update/delete/restore are captured, unchanged selected fields are omitted,
-and images are frozen before a later publisher runs. `auditFields()` is an explicit
-allowlist; override `customizeAudit(array $event): array` for safe enrichment or
-redaction. The authenticated actor is resolved at capture time unless supplied in
-the scoped context. `AuditContext::run()` restores its previous context on success
-or exception. Propagate trusted context explicitly into queued jobs.
+The trait captures create, update, delete and restore events. Saves, deletes and
+restores require an already-open transaction on the model's connection. The model
+write and outbox insert roll back together. Updates with no changes to selected
+fields are skipped; before/after images are captured before publishing.
 
-Schedule or invoke the publisher in the integrating application:
+`AuditContext::run()` scopes context to the callback and restores the previous
+context even on an exception. The trait uses the authenticated actor when none
+is supplied. Pass trusted context explicitly into queued jobs.
+Override `customizeAudit(array $event): array` to redact or enrich an event.
+
+### Publish the outbox
+
+Run this command periodically from the application's scheduler or job runner:
 
 ```sh
 php artisan traceflow:audit-publish --limit=100
-# For a named database containing an outbox:
-php artisan traceflow:audit-publish --connection=business --limit=100
 ```
 
-The publisher removes a row only after a `persisted` receipt. Transient failures
-keep the same envelope and schedule bounded backoff. Permanent errors retain the
-row with `failed_at` and a non-sensitive error summary for operator review. After
-correcting configuration, clear `failed_at` and reset `available_at` to retry; a
-conflicting payload needs investigation, not a new ID hiding the conflict.
-Concurrent publishers may send duplicates, which the backend deduplicates.
-Disabling delivery retains pending events for retry, without false success.
+For a named database, add `--connection=business`. Each invocation processes at
+most the requested number of ready rows and exits. Choose the frequency and
+batch size for the expected volume.
 
-Bulk updates/deletes, raw SQL, pivot operations and muted Eloquent events need
-explicit capture; installing a trait does not audit every database write. Use
-`AuditClient::createEvent()` and `AuditOutbox::record($event, $connection)` inside
-the same transaction for those flows. The application owns concurrency/locking
-needed to obtain the actual before/after images. Do not reload a mutable model in
-the publisher to reconstruct a past change.
+A row is deleted only after Traceflow confirms persistence. Transient failures
+retain the same event and set a later `available_at`. Permanent failures set
+`failed_at` and retain the row for review. After fixing the cause, clear
+`failed_at` and reset `available_at` to retry. Investigate `409` conflicts before
+resending: the same event ID cannot describe different data.
 
-### Generic events
+Concurrent publishers may send duplicates; Traceflow deduplicates by source and
+event ID. Audit history is read from Traceflow. The outbox holds pending or failed
+deliveries, not the history shown to users.
+
+### Manual capture
+
+Bulk updates/deletes, raw SQL, pivot changes and muted Eloquent events bypass
+model capture. Use the manual API inside the transaction doing that work.
+For example, with an existing `quotes` table on the default connection:
 
 ```php
 use Illuminate\Support\Facades\DB;
@@ -81,710 +126,122 @@ use Smartness\TraceFlow\Audit\AuditClient;
 use Smartness\TraceFlow\Audit\AuditEvent;
 use Smartness\TraceFlow\Audit\AuditOutbox;
 
-$event = app(AuditClient::class)->createEvent([
-    'subject' => ['type' => 'custom_object', 'id' => '12345'],
-    'action' => 'updated',
-    'changes' => AuditEvent::diff(['note' => null, 'enabled' => false], ['enabled' => true]),
-    'metadata' => ['reason' => 'Manual operation'],
-]);
-// Inside the transaction that performs the business change:
-app(AuditOutbox::class)->record($event, DB::connection());
-// Direct-send alternative, without an atomic delivery guarantee:
-// app(AuditClient::class)->record($event);
+$db = DB::connection();
+$db->transaction(function () use ($db) {
+    $row = $db->table('quotes')->where('id', '12345')->lockForUpdate()->first();
+    if ($row === null) {
+        throw new RuntimeException('Quote not found');
+    }
+
+    $before = ['total' => (string) $row->total];
+    $after = ['total' => '420.00'];
+    $changes = AuditEvent::diff($before, $after);
+    if ((array) $changes['before'] === [] && (array) $changes['after'] === []) {
+        return;
+    }
+
+    $db->table('quotes')->where('id', '12345')->update($after);
+    $event = app(AuditClient::class)->createEvent([
+        'subject' => ['type' => 'quote', 'id' => '12345'],
+        'action' => 'updated',
+        'actor' => ['type' => 'user', 'id' => '42'],
+        'changes' => $changes,
+        'metadata' => ['reason' => 'Discount agreed'],
+    ]);
+    app(AuditOutbox::class)->record($event, $db);
+});
 ```
 
-Types and IDs are strings, including UUIDs. Images preserve null versus missing
-keys; use decimal strings for exact monetary values. Custom activities can omit
-changes; creation uses an empty before object, deletion an empty after object.
-Context belongs in metadata rather than duplicated unchanged fields.
+Manual events take their context from the supplied payload. Obtain the actual
+before/after values within the operation; account for locking, casts and database
+triggers in the integrating application. Do not reconstruct past values in the
+publisher by reloading the current model.
 
-### Replacing an existing activity log
+`AuditClient::record($event)` sends directly and returns a persistence receipt or
+throws `AuditDeliveryException`. `recordAudit($input)` creates and sends an event
+in one call; it is also available on `TraceFlowSDK`. Direct sending alone does
+not recover an event lost between business commit and a process crash.
 
-Adopt `LogsAudit` on models and use the manual API for custom activities and writes
-that bypass Eloquent events. The outbox is a delivery queue, not a second activity
-log: delivered entries are removed, and history is queried from Traceflow.
+Subject types and IDs are strings. Missing fields differ from `null`; use decimal
+strings for exact money values. Creation uses an empty before image, deletion an
+empty after image. Custom activities can omit changes. Select fields and redact
+metadata before capture. See the [backend audit contract](https://github.com/smartpricing/traceflow-service#audit-log)
+for payload limits, retention and read APIs.
 
-Move existing log readers to Traceflow as part of application adoption. JSON
-searches, engagement metrics and business restore actions need explicit migration
-decisions; switching the writer alone does not replace them. Historical import
-is separate work. Preserve existing field allowlists and redaction rules.
+When replacing another activity log, migrate its readers as well as writers.
+Historical import, business restores and application-specific search or metrics
+are separate integration work.
 
-Audit tests (no application databases):
+## Tracing
+
+```php
+use Smartness\TraceFlow\Facades\TraceFlow;
+
+$trace = TraceFlow::startTrace(traceType: 'quote', title: 'Calculate quote');
+$step = $trace->startStep(name: 'Calculate total');
+$step->log('Calculation completed');
+$step->finish(output: ['total' => '420.00']);
+$trace->finish(result: ['quote_id' => '12345']);
+```
+
+Use `fail($error)` on a trace or step to record a failure. Explicit trace IDs must
+be UUIDs; omit them to generate one. `getTrace($traceId)` reads live state over
+HTTP, and `heartbeat($traceId)` refreshes activity. With silent errors enabled,
+a returned handle does not prove that the backend accepted or found a trace.
+
+Register [TraceFlowMiddleware](src/Middleware/TraceFlowMiddleware.php) in the
+application's middleware configuration to trace HTTP requests. It reads
+`X-Trace-Id`, stores the handle in request attribute `trace`, finishes or fails
+the trace after the response, and clears context.
+
+For queue propagation, [TracedJob](src/Queue/TracedJob.php) captures the current
+trace when `initializeTracedJob()` is called in the job constructor. Its middleware
+restores and clears that context. Merge this middleware if the job already defines
+its own middleware. This propagates trace context, not `AuditContext`.
+
+## Delivery settings
+
+| Setting | Behaviour |
+| --- | --- |
+| `TRACEFLOW_TRANSPORT=http` | Trace events use HTTP; `log` writes to Laravel's log channel. Kafka is not implemented in the PHP SDK. |
+| `TRACEFLOW_ASYNC_HTTP=true` | Default for tracing. Pending requests are flushed during shutdown; abrupt termination can lose them. |
+| `TRACEFLOW_SILENT_ERRORS=true` | Default for tracing delivery failures. Configuration and input errors can still throw. |
+| `TRACEFLOW_ENABLED=false` | Drops trace events. Audit delivery throws a retryable error, leaving outbox rows pending. |
+| `TRACEFLOW_TIMEOUT` | HTTP timeout in seconds; default `5`. |
+| `TRACEFLOW_MAX_RETRIES` | Default `3`. |
+| `TRACEFLOW_RETRY_DELAY` | Initial retry delay in milliseconds; default `1000`. |
+
+Audit always uses synchronous HTTP and explicit errors, regardless of the tracing
+transport, `async_http` or `silent_errors`. Disabling delivery does not disable
+model capture or its transaction requirement.
+
+For local trace logs, set `TRACEFLOW_TRANSPORT=log` and choose
+`TRACEFLOW_LOG_CHANNEL` / `TRACEFLOW_LOG_LEVEL`. These settings do not redirect
+audit events to a log file.
+
+## Development
+
+From this directory:
+
+```sh
+composer install
+composer test:unit
+composer test:feature
+composer analyse
+composer format:check
+```
+
+Run the audit tests without an application database:
 
 ```sh
 vendor/bin/phpunit tests/Unit/AuditTest.php tests/Unit/AuditOutboxTest.php
-# Optional compatibility smoke test using installed framework classes only:
+```
+
+Optional compatibility check against installed Laravel classes, using isolated
+SQLite rather than booting the application:
+
+```sh
 php tests/audit-installed-framework-smoke.php /path/to/installed/vendor
 ```
 
-> **📦 Packagist Package:** This package is automatically synchronized to [`smartpricing/traceflow-laravel`](https://github.com/smartpricing/traceflow-laravel) for Packagist distribution. Install via Composer from the split repository.
-
-[![Packagist Version](https://img.shields.io/packagist/v/smartness/traceflow-laravel.svg)](https://packagist.org/packages/smartness/traceflow-laravel)
-[![PHP Version](https://img.shields.io/badge/PHP-8.1+-blue.svg)](https://www.php.net/)
-[![Laravel Version](https://img.shields.io/badge/Laravel-10%20%7C%2011%20%7C%2012%20%7C%2013-orange.svg)](https://laravel.com/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-Passing-brightgreen.svg)](tests/)
-
-**Production-ready, stateless distributed tracing SDK for Laravel applications with event-sourced architecture.**
-
-TraceFlow SDK for Laravel provides enterprise-grade distributed tracing capabilities with zero local state dependencies. Built on an event-sourced architecture, it delivers comprehensive observability across microservices using HTTP or Kafka transport, without compromising application reliability or performance.
-
-## Table of Contents
-
-- [Features](#features)
-- [Installation](#installation)
-- [Configuration](#configuration)
-- [Quick Start](#quick-start)
-- [Pattern Examples](#pattern-examples)
-- [API Reference](#api-reference)
-- [Cross-Service Tracing](#cross-service-tracing)
-- [Testing](#testing)
-- [Performance & Async Transport](#performance--async-transport)
-- [Production Best Practices](#production-best-practices)
-- [Examples](#examples)
-- [Contributing](#contributing)
-- [License](#license)
-
-## ✨ Features
-
-- 📦 **Stateless Architecture** - No Redis, no databases, pure event streaming
-- ⚡ **Non-Blocking Performance** - Async HTTP transport with <2ms overhead per event
-- 🔀 **Transport Agnostic** - Use HTTP REST API, Log file, or Kafka with identical API
-- 🧵 **Context-Aware** - Automatic context propagation across service boundaries
-- 🔄 **Retry Logic** - Built-in exponential backoff and circuit breaker patterns
-- 🛡️ **Production-Ready** - Silent error mode ensures tracing never fails your application
-- 🎯 **Type-Safe** - Full PHP 8.1+ support with typed properties and enums
-- 📝 **Event-Based** - Append-only event model for audit trails and replay capabilities
-- 🚀 **Laravel Integration** - Seamless integration via Middleware, Facade, and Service Provider
-- 🌐 **Cross-Service Tracing** - Propagate trace context across distributed systems
-- 📨 **Queue Context Propagation** - Automatic trace context flow through queue jobs
-- ✅ **90%+ Test Coverage** - Comprehensive unit and integration test suite
-
-## 📦 Installation
-
-```bash
-composer require smartness/traceflow-laravel
-```
-
-## ⚙️ Configuration
-
-Publish configuration:
-
-```bash
-php artisan vendor:publish --tag=traceflow-config
-```
-
-Configure in `.env`:
-
-```env
-TRACEFLOW_TRANSPORT=http          # http, log, or kafka
-TRACEFLOW_SOURCE=my-laravel-app
-TRACEFLOW_URL=http://localhost:3009
-TRACEFLOW_API_KEY=your-api-key
-
-# Optional
-TRACEFLOW_TIMEOUT=5.0
-TRACEFLOW_MAX_RETRIES=3
-TRACEFLOW_SILENT_ERRORS=true
-
-# Performance (Async HTTP enabled by default)
-TRACEFLOW_ASYNC_HTTP=true
-
-# Log transport options (used when TRACEFLOW_TRANSPORT=log)
-TRACEFLOW_LOG_CHANNEL=stack       # Laravel log channel (default: LOG_CHANNEL)
-TRACEFLOW_LOG_LEVEL=info          # Log level: debug, info, warning, error, etc.
-
-# Queue context propagation (enabled by default)
-TRACEFLOW_QUEUE_PROPAGATE=true
-
-# Master kill switch — set false in local/dev when the collector isn't running.
-# The SDK keeps its full public surface (no call-site changes) but events go to
-# a NullTransport: no HTTP, no circuit-breaker error_log spam.
-TRACEFLOW_ENABLED=true
-```
-
-## 🚀 Quick Start
-
-### Using Facade
-
-```php
-use Smartness\TraceFlow\Facades\TraceFlow;
-
-// Start a trace
-$trace = TraceFlow::startTrace(
-    traceType: 'api_request',
-    title: 'Process User Request'
-);
-
-// Start a step
-$step = $trace->startStep(name: 'Validate Input');
-$step->log('Validation successful');
-$step->finish(['valid' => true]);
-
-// Finish trace
-$trace->finish(['success' => true]);
-```
-
-### Using Middleware (Recommended)
-
-Add middleware to `app/Http/Kernel.php`:
-
-```php
-protected $middleware = [
-    // ...
-    \Smartness\TraceFlow\Middleware\TraceFlowMiddleware::class,
-];
-```
-
-Now all HTTP requests are automatically traced!
-
-```php
-// In your controller
-public function show(Request $request, string $id)
-{
-    // Get trace from request
-    $trace = $request->attributes->get('trace');
-    
-    // Add steps
-    $step = $trace->startStep(name: 'Fetch User from DB');
-    $user = User::find($id);
-    $step->finish(['user_id' => $user->id]);
-    
-    return response()->json($user);
-    // Trace auto-completes after response
-}
-```
-
-### Using Dependency Injection
-
-```php
-use Smartness\TraceFlow\TraceFlowSDK;
-
-class UserController extends Controller
-{
-    public function __construct(private TraceFlowSDK $sdk)
-    {
-    }
-    
-    public function index()
-    {
-        $trace = $this->sdk->startTrace(
-            traceType: 'list_users',
-            title: 'List Users'
-        );
-        
-        $step = $trace->startStep(name: 'Query Database');
-        $users = User::all();
-        $step->finish(['count' => $users->count()]);
-        
-        $trace->finish(['users' => $users]);
-        
-        return response()->json($users);
-    }
-}
-```
-
-## 💡 Pattern Examples
-
-### Pattern 1: HTTP Request with Custom ID
-
-```php
-use Smartness\TraceFlow\Facades\TraceFlow;
-
-Route::post('/orders', function (Request $request) {
-    // Start trace with custom ID
-    $traceId = $request->header('X-Request-ID') ?? Str::uuid();
-    
-    $trace = TraceFlow::startTrace(
-        traceId: $traceId,
-        traceType: 'create_order',
-        title: 'Create Order'
-    );
-    
-    // Process order...
-    $step1 = $trace->startStep(name: 'Validate Order');
-    $step1->finish();
-    
-    $step2 = $trace->startStep(name: 'Save to Database');
-    $order = Order::create($request->all());
-    $step2->finish(['order_id' => $order->id]);
-    
-    $trace->finish(['order' => $order]);
-    
-    return response()->json($order);
-});
-```
-
-### Pattern 2: Service Layer Integration
-
-```php
-class OrderService
-{
-    public function __construct(private TraceFlowSDK $sdk)
-    {
-    }
-    
-    public function createOrder(array $data, string $traceId): Order
-    {
-        // Retrieve trace in service layer
-        $trace = $this->sdk->getTrace($traceId);
-        
-        $trace->log('Starting order creation');
-        
-        $step = $trace->startStep(
-            name: 'Create Order',
-            stepType: 'database',
-            input: $data
-        );
-        
-        try {
-            $order = Order::create($data);
-            
-            // Send notification (nested operation)
-            $this->sendOrderNotification($order, $traceId);
-            
-            $step->finish(['order_id' => $order->id]);
-            
-            return $order;
-        } catch (\Exception $e) {
-            $step->fail($e);
-            throw $e;
-        }
-    }
-    
-    private function sendOrderNotification(Order $order, string $traceId): void
-    {
-        $trace = $this->sdk->getTrace($traceId);
-        
-        $step = $trace->startStep(name: 'Send Email Notification');
-        
-        // Send email...
-        Mail::to($order->user)->send(new OrderCreated($order));
-        
-        $step->finish(['sent' => true]);
-    }
-}
-```
-
-### Pattern 3: Static Context Access
-
-Access the current trace from anywhere without DI:
-
-```php
-use Smartness\TraceFlow\Context\TraceFlowContext;
-
-class DeeplyNestedService
-{
-    public function doWork(): void
-    {
-        // No SDK injection needed — works anywhere during the request
-        $traceId = TraceFlowContext::currentTraceId();
-
-        if (TraceFlowContext::hasActiveTrace()) {
-            // Use $traceId for logging, external API calls, etc.
-            Log::info('Processing', ['trace_id' => $traceId]);
-        }
-    }
-}
-```
-
-### Pattern 4: Queue Jobs with Automatic Context
-
-Use the `TracedJob` trait for automatic trace propagation through queue jobs:
-
-```php
-use Smartness\TraceFlow\Queue\TracedJob;
-
-class ProcessOrderJob implements ShouldQueue
-{
-    use TracedJob;
-
-    public function __construct(public Order $order)
-    {
-        $this->initializeTracedJob(); // Captures current trace context
-    }
-
-    public function handle(): void
-    {
-        // Trace context is automatically restored!
-        $trace = TraceFlow::getCurrentTrace();
-
-        $step = $trace->startStep(
-            name: 'Background Processing',
-            stepType: 'job'
-        );
-
-        try {
-            $this->order->process();
-
-            // Dispatching another job? Context propagates automatically.
-            SendConfirmationEmail::dispatch($this->order);
-
-            $step->finish(['processed' => true]);
-        } catch (\Exception $e) {
-            $step->fail($e);
-            throw $e;
-        }
-    }
-}
-
-// Dispatch — no need to pass trace ID manually
-Route::post('/orders', function (Request $request) {
-    $trace = TraceFlow::startTrace(title: 'Create Order');
-
-    $order = Order::create($request->all());
-    ProcessOrderJob::dispatch($order); // Context captured automatically
-
-    return response()->json($order);
-});
-```
-
-The trace context chains through any depth of job dispatches: Job A -> Job B -> Job C all share the same trace ID.
-
-### Pattern 5: Long-Running Processes
-
-```php
-use Smartness\TraceFlow\Facades\TraceFlow;
-
-class ImportUsersCommand extends Command
-{
-    public function handle(): void
-    {
-        $trace = TraceFlow::startTrace(
-            traceType: 'batch_import',
-            title: 'Import Users from CSV'
-        );
-        
-        $users = $this->loadUsersFromCSV();
-        
-        foreach ($users as $index => $userData) {
-            $step = $trace->startStep(
-                name: "Import User #{$index}",
-                input: $userData
-            );
-            
-            User::create($userData);
-            
-            $step->finish();
-            
-            // Send heartbeat every 100 users
-            if ($index % 100 === 0) {
-                TraceFlow::heartbeat($trace->traceId);
-            }
-        }
-        
-        $trace->finish(['imported' => count($users)]);
-    }
-}
-```
-
-## 📚 API Reference
-
-### TraceFlowSDK Methods
-
-```php
-// Start trace
-$trace = TraceFlow::startTrace(
-    traceType: 'process_type',     // Optional
-    title: 'Human readable title', // Optional
-    description: 'Description',    // Optional
-    owner: 'team-name',           // Optional
-    tags: ['tag1', 'tag2'],       // Optional
-    metadata: ['key' => 'value'], // Optional
-    params: $inputData,           // Optional
-    traceTimeoutMs: 5000,         // Optional - custom timeout
-    stepTimeoutMs: 2000           // Optional - custom step timeout
-);
-
-// Get existing trace
-$trace = $sdk->getTrace('trace-id');
-
-// Get current trace from context (checks SDK state + TraceFlowContext)
-$trace = $sdk->getCurrentTrace();
-
-// Set trace ID manually (used by queue middleware)
-$sdk->setCurrentTraceId('trace-id');
-
-// Send heartbeat
-$sdk->heartbeat('trace-id');
-
-// Start step (requires active trace)
-$step = $sdk->startStep(
-    name: 'Step Name',
-    stepType: 'database',
-    input: ['data'],
-    metadata: ['key' => 'value']
-);
-
-// Log message
-$sdk->log('Message', 'INFO', 'event_type', ['details']);
-```
-
-### TraceHandle Methods
-
-```php
-$trace->finish(result: ['data'], metadata: ['key' => 'value']);
-$trace->fail(error: 'Error message');
-$trace->cancel();
-$trace->startStep(name: 'Step Name', ...);
-$trace->log(message: 'Message', level: 'INFO', ...);
-```
-
-### StepHandle Methods
-
-```php
-$step->finish(output: ['data'], metadata: ['key' => 'value']);
-$step->fail(error: 'Error message');
-$step->log(message: 'Message', level: 'INFO', ...);
-```
-
-## 🌐 Cross-Service Tracing
-
-### Service A (API Gateway)
-
-```php
-// Service A: Start trace
-$trace = TraceFlow::startTrace(title: 'User Registration');
-
-// Call Service B with trace ID
-Http::withHeaders([
-    'X-Trace-Id' => $trace->traceId,
-])->post('http://service-b/api/endpoint', $data);
-
-$trace->finish();
-```
-
-### Service B (Email Service)
-
-```php
-// Service B: Retrieve existing trace
-$traceId = request()->header('X-Trace-Id');
-
-// Get the trace started by Service A
-$trace = TraceFlow::getTrace($traceId);
-
-// Add steps to the same trace
-$trace->startStep(name: 'Send Welcome Email');
-
-// Process...
-$trace->finish();
-```
-
-## 🧪 Testing
-
-The SDK includes comprehensive test coverage for async transport:
-
-```bash
-# Run all tests
-composer test
-
-# Run unit tests only (async transport, SDK)
-composer test:unit
-
-# Run integration tests (end-to-end scenarios)
-composer test:feature
-
-# Generate coverage report
-composer test:coverage
-
-# Run static analysis
-composer analyse
-```
-
-### Test Coverage
-
-The SDK maintains comprehensive test coverage:
-
-- **AsyncHttpTransport**: Non-blocking behavior, retries, promise handling
-- **TraceFlowSDK**: Configuration, context propagation, lifecycle
-- **Integration**: Complete workflows, performance benchmarks
-- **90%+ code coverage** with unit and feature tests
-
-See `tests/README.md` for detailed testing documentation.
-
-### Example Test
-
-```php
-use Smartness\TraceFlow\Facades\TraceFlow;
-
-class UserControllerTest extends TestCase
-{
-    public function test_creates_user()
-    {
-        // TraceFlow::fake(); // Coming soon
-
-        $response = $this->post('/users', ['name' => 'John']);
-
-        $response->assertStatus(201);
-        $response->assertHeader('X-Trace-Id');
-    }
-}
-```
-
-## 📋 Configuration Reference
-
-```php
-// config/traceflow.php
-return [
-    'transport' => 'http',                    // 'http', 'log', or 'kafka'
-    'async_http' => true,                     // Use async HTTP (default: true)
-    'source' => env('APP_NAME'),
-    'endpoint' => 'http://localhost:3009',  // env: TRACEFLOW_URL
-    'api_key' => 'your-api-key',
-    'timeout' => 5.0,
-    'max_retries' => 3,
-    'retry_delay' => 1000,
-    'silent_errors' => true,
-
-    // Log transport
-    'log_channel' => 'stack',                 // Laravel log channel
-    'log_level' => 'info',                    // Log level for trace events
-
-    'middleware' => [
-        'enabled' => true,
-        'header_name' => 'X-Trace-Id',
-    ],
-
-    'queue' => [
-        'propagate_context' => true,
-    ],
-];
-```
-
-## 📝 Log Transport
-
-The **log transport** writes all trace events to Laravel's log system instead of sending them over HTTP. This is useful for:
-
-- **Local development** — inspect traces without running a TraceFlow server
-- **Debugging** — see the full event flow in your log files
-- **Environments without network access** — air-gapped or CI/CD pipelines
-- **Audit trails** — persist trace data alongside application logs
-
-### Setup
-
-```env
-TRACEFLOW_TRANSPORT=log
-TRACEFLOW_LOG_CHANNEL=stack   # any Laravel log channel (default: LOG_CHANNEL)
-TRACEFLOW_LOG_LEVEL=info      # debug, info, warning, error, etc.
-```
-
-### Log Output Example
-
-Each event is written as a structured log entry with a human-readable message and full context:
-
-```
-[2026-04-07 10:00:00] local.INFO: [TraceFlow] trace_started trace=abc-123 title="My Trace" type=api_request {"event_id":"...","event_type":"trace_started","trace_id":"abc-123",...}
-[2026-04-07 10:00:01] local.INFO: [TraceFlow] step_started trace=abc-123 step=step-1 name="Validate Input" type=validation {...}
-[2026-04-07 10:00:01] local.INFO: [TraceFlow] step_finished trace=abc-123 step=step-1 {...}
-[2026-04-07 10:00:02] local.INFO: [TraceFlow] trace_finished trace=abc-123 {...}
-```
-
-### Using a Dedicated Channel
-
-You can route trace events to a dedicated log file by configuring a custom channel in `config/logging.php`:
-
-```php
-// config/logging.php
-'channels' => [
-    'traceflow' => [
-        'driver' => 'single',
-        'path' => storage_path('logs/traceflow.log'),
-        'level' => 'debug',
-    ],
-],
-```
-
-```env
-TRACEFLOW_TRANSPORT=log
-TRACEFLOW_LOG_CHANNEL=traceflow
-```
-
-> **Note:** The log transport has zero external dependencies and no performance overhead beyond normal log writes. The API is identical to the HTTP transport — switch between them by changing a single env variable.
-
-## ⚡ Performance & Async Transport
-
-**By default, the SDK uses non-blocking async HTTP** for maximum performance:
-
-### Performance Comparison
-
-| Transport | Overhead per Event | Blocking |
-|-----------|-------------------|----------|
-| **Async HTTP** (default) | **~2ms** | ❌ No |
-| Blocking HTTP | ~50-200ms | ✅ Yes |
-| **Log** | **<1ms** | ❌ No |
-
-### How Async Works
-
-1. **Fire-and-forget**: `send()` returns immediately without waiting for HTTP response
-2. **Promise-based**: Uses Guzzle async promises under the hood
-3. **Auto-flush**: Promises automatically settled on Laravel shutdown
-4. **Retry logic**: Exponential backoff handled asynchronously
-
-### Configuration
-
-```env
-# Enabled by default (recommended)
-TRACEFLOW_ASYNC_HTTP=true
-
-# Disable for debugging or compatibility
-TRACEFLOW_ASYNC_HTTP=false
-```
-
-### Trade-offs
-
-**Async (default)**:
-- **Pros**: Minimal latency impact (~2ms), no additional infrastructure needed
-- **Cons**: Events lost if PHP crashes before shutdown, slightly higher memory usage
-
-**Blocking**:
-- **Pros**: Guaranteed delivery before request completes
-- **Cons**: High latency impact (50-200ms per event), slows down user requests
-
-## 🔒 Production Best Practices
-
-1. **Always use silent errors in production**
-   ```env
-   TRACEFLOW_SILENT_ERRORS=true
-   ```
-
-2. **Use middleware for automatic HTTP tracing**
-3. **Use the `TracedJob` trait** for automatic queue context propagation
-4. **Send heartbeats for long-running processes**
-5. **Use environment variables for configuration**
-
-## 📖 Examples
-
-See `examples/` directory for:
-- **BasicExample.php** - Fundamental SDK usage patterns
-- **CustomTimeouts.php** - Configuring trace and step timeouts
-- **AsyncPerformance.php** - Performance comparison and async transport demo
-- Laravel API integration
-- Background jobs
-- Distributed tracing
-- Long-running processes
-
-## 🤝 Contributing
-
-Contributions are welcome! Please follow these steps:
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-Please ensure:
-- All tests pass (`composer test`)
-- Code follows PSR-12 standards (`composer format`)
-- Static analysis passes (`composer analyse`)
-- You've added tests for new features
-
-## 📄 License
-
-MIT License - see [LICENSE](LICENSE) file for details.
-
-Copyright © 2025 Smartness
-
-
-
-
+License: MIT, as declared in [composer.json](composer.json).

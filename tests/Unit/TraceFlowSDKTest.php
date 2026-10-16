@@ -131,7 +131,8 @@ class TraceFlowSDKTest extends TestCase
     public function test_start_trace_returns_trace_handle(): void
     {
         $sdk = new TraceFlowSDK([
-            'transport' => 'http',
+            // These tests exercise handles/context; transport delivery has its own tests.
+            'enabled' => false,
             'source' => 'test',
             'endpoint' => 'http://localhost:3009',
             'silent_errors' => true,
@@ -149,7 +150,8 @@ class TraceFlowSDKTest extends TestCase
     public function test_get_current_trace_returns_active_trace(): void
     {
         $sdk = new TraceFlowSDK([
-            'transport' => 'http',
+            // These tests exercise handles/context; transport delivery has its own tests.
+            'enabled' => false,
             'source' => 'test',
             'endpoint' => 'http://localhost:3009',
             'silent_errors' => true,
@@ -170,7 +172,8 @@ class TraceFlowSDKTest extends TestCase
     public function test_run_with_trace_executes_callback(): void
     {
         $sdk = new TraceFlowSDK([
-            'transport' => 'http',
+            // These tests exercise handles/context; transport delivery has its own tests.
+            'enabled' => false,
             'source' => 'test',
             'endpoint' => 'http://localhost:3009',
             'silent_errors' => true,
@@ -194,7 +197,8 @@ class TraceFlowSDKTest extends TestCase
     public function test_run_with_trace_handles_exception(): void
     {
         $sdk = new TraceFlowSDK([
-            'transport' => 'http',
+            // These tests exercise handles/context; transport delivery has its own tests.
+            'enabled' => false,
             'source' => 'test',
             'endpoint' => 'http://localhost:3009',
             'silent_errors' => true,
@@ -240,7 +244,8 @@ class TraceFlowSDKTest extends TestCase
     public function test_start_step_with_current_trace_returns_step_handle(): void
     {
         $sdk = new TraceFlowSDK([
-            'transport' => 'http',
+            // These tests exercise handles/context; transport delivery has its own tests.
+            'enabled' => false,
             'source' => 'test',
             'endpoint' => 'http://localhost:3009',
             'silent_errors' => true,

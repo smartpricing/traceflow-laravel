@@ -63,4 +63,40 @@ class AuditTest extends TestCase
         }
         $this->assertSame([], $context->values());
     }
+
+    public function test_publisher_deadline_caps_http_timeout_and_does_not_sleep_past_budget(): void
+    {
+        $event = AuditEvent::create('test', ['action' => 'viewed']);
+        $history = [];
+        $handler = HandlerStack::create(new MockHandler([new Response(503)]));
+        $handler->push(Middleware::history($history));
+        $client = new AuditClient(['source' => 'test', 'endpoint' => 'http://audit.test', 'api_key' => 'key', 'retry_delay' => 30000], new Client(['handler' => $handler]));
+        $start = microtime(true);
+        try {
+            $client->record($event, 0.1);
+            $this->fail('Expected retryable delivery failure');
+        } catch (AuditDeliveryException $error) {
+            $this->assertTrue($error->retryable);
+        }
+        $this->assertLessThan(1, microtime(true) - $start);
+        $this->assertCount(1, $history);
+        $this->assertLessThanOrEqual(0.1, $history[0]['options']['timeout']);
+        $this->assertFalse($history[0]['options']['allow_redirects']);
+    }
+
+    public function test_authentication_and_missing_route_failures_remain_recoverable_without_immediate_retries(): void
+    {
+        foreach ([401, 403, 404] as $status) {
+            $mock = new MockHandler([new Response($status)]);
+            $client = new AuditClient(['source' => 'test', 'endpoint' => 'http://audit.test', 'api_key' => 'key'], new Client(['handler' => HandlerStack::create($mock)]));
+            try {
+                $client->recordAudit(['action' => 'viewed']);
+                $this->fail('Expected delivery failure');
+            } catch (AuditDeliveryException $error) {
+                $this->assertTrue($error->retryable);
+                $this->assertSame($status, $error->statusCode);
+                $this->assertSame(0, $mock->count());
+            }
+        }
+    }
 }

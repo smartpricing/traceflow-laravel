@@ -36,6 +36,7 @@ class AuditOutboxTest extends TestCase
     {
         parent::setUp();
         (require __DIR__.'/../../database/migrations/create_traceflow_audit_outbox.php.stub')->up();
+        (require __DIR__.'/../../database/migrations/index_traceflow_audit_outbox.php.stub')->up();
         Schema::create('audit_test_subjects', function (Blueprint $table) {
             $table->id();
             $table->string('status')->nullable();
@@ -105,6 +106,54 @@ class AuditOutboxTest extends TestCase
         DB::table('traceflow_audit_outbox')->update(['available_at' => now()->subMinute()]);
         $this->artisan('traceflow:audit-publish')->assertExitCode(0);
         $this->assertSame(0, DB::table('traceflow_audit_outbox')->count());
+    }
+
+    public function test_outage_stops_the_batch_without_discarding_other_events(): void
+    {
+        DB::transaction(function () {
+            for ($i = 0; $i < 3; $i++) {
+                AuditTestSubject::create(['status' => 'draft']);
+            }
+        });
+        $mock = new MockHandler([new Response(503)]);
+        $this->app->instance(AuditClient::class, new AuditClient(['source' => 'audit-test', 'endpoint' => 'http://audit.test', 'api_key' => 'key', 'max_retries' => 0], new Client(['handler' => HandlerStack::create($mock)])));
+        $this->artisan('traceflow:audit-publish', ['--json' => true])->assertExitCode(1);
+        $this->assertSame(3, DB::table('traceflow_audit_outbox')->count());
+        $this->assertSame(1, (int) DB::table('traceflow_audit_outbox')->sum('attempts'));
+        $this->assertSame(0, DB::table('traceflow_audit_outbox')->whereNotNull('failed_at')->count());
+    }
+
+    public function test_status_detects_backlog_and_failed_events_can_be_requeued_without_mutation(): void
+    {
+        $this->artisan('traceflow:audit-status')->assertExitCode(0);
+        DB::transaction(fn () => AuditTestSubject::create(['status' => 'draft']));
+        $row = DB::table('traceflow_audit_outbox')->first();
+        DB::table('traceflow_audit_outbox')->update(['created_at' => now()->subMinutes(10)]);
+        $this->artisan('traceflow:audit-status', ['--max-age' => 300])->assertExitCode(1);
+        $this->artisan('traceflow:audit-status', ['--max-age' => 1000])->assertExitCode(0);
+        $this->artisan('traceflow:audit-status', ['--max-age' => 1000, '--max-pending' => 0])->assertExitCode(1);
+        DB::table('traceflow_audit_outbox')->update(['failed_at' => now(), 'attempts' => 2]);
+        $this->artisan('traceflow:audit-status')->assertExitCode(1);
+        $this->artisan('traceflow:audit-retry', ['event_id' => $row->event_id])->assertExitCode(0);
+        $retry = DB::table('traceflow_audit_outbox')->first();
+        $this->assertNull($retry->failed_at);
+        $this->assertSame($row->payload, $retry->payload);
+        $this->assertSame(2, $retry->attempts);
+        $this->artisan('traceflow:audit-retry', ['event_id' => $row->event_id])->assertExitCode(1);
+    }
+
+    public function test_permanent_failure_does_not_block_valid_events_and_can_be_recovered(): void
+    {
+        DB::transaction(function () {
+            AuditTestSubject::create(['status' => 'invalid']);
+            AuditTestSubject::create(['status' => 'valid']);
+        });
+        $rows = DB::table('traceflow_audit_outbox')->orderBy('created_at')->get();
+        $mock = new MockHandler([new Response(400), new Response(201, [], json_encode(['status' => 'persisted', 'event_id' => $rows[1]->event_id]))]);
+        $this->app->instance(AuditClient::class, new AuditClient(['source' => 'audit-test', 'endpoint' => 'http://audit.test', 'api_key' => 'key', 'max_retries' => 0], new Client(['handler' => HandlerStack::create($mock)])));
+        $this->artisan('traceflow:audit-publish')->assertExitCode(1);
+        $this->assertSame(1, DB::table('traceflow_audit_outbox')->count());
+        $this->assertNotNull(DB::table('traceflow_audit_outbox')->value('failed_at'));
     }
 }
 

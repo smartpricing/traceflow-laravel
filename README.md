@@ -97,22 +97,44 @@ Override `customizeAudit(array $event): array` to redact or enrich an event.
 Run this command periodically from the application's scheduler or job runner:
 
 ```sh
-php artisan traceflow:audit-publish --limit=100
+php artisan traceflow:audit-publish --limit=100 --max-seconds=30 --json
 ```
 
 For a named database, add `--connection=business`. Each invocation processes at
 most the requested number of ready rows and exits. Choose the frequency and
-batch size for the expected volume.
+batch size for the expected volume. `--max-seconds` bounds delivery attempts and
+HTTP timeouts for one invocation (default 30, maximum 300); database queries still
+use the application's database timeout. A transient delivery failure stops the
+batch to avoid retrying every row during an outage. Remaining rows stay pending.
+`--json` reports published, retry-scheduled and failed counts. A delivery failure
+or exhausted time budget returns a nonzero exit code.
 
 A row is deleted only after Traceflow confirms persistence. Transient failures
-retain the same event and set a later `available_at`. Permanent failures set
-`failed_at` and retain the row for review. After fixing the cause, clear
-`failed_at` and reset `available_at` to retry. Investigate `409` conflicts before
-resending: the same event ID cannot describe different data.
+retain the same event and set a later `available_at`. Missing credentials and
+HTTP `401`/`403`/`404` also retain pending rows: fixing publisher configuration or
+deploying the route must not require reconstructing audit events. Those HTTP
+responses end the current delivery attempt without immediate HTTP retries. Permanent failures set
+`failed_at` and retain the row for review. After fixing the cause, run
+`php artisan traceflow:audit-retry EVENT_ID`. It preserves the original payload,
+ID and attempt history. Investigate `409` conflicts before resending: the same
+event ID cannot describe different data.
 
 Concurrent publishers may send duplicates; Traceflow deduplicates by source and
 event ID. Audit history is read from Traceflow. The outbox holds pending or failed
 deliveries, not the history shown to users.
+
+Monitor the publisher separately from application request health:
+
+```sh
+php artisan traceflow:audit-status --max-age=300 --max-pending=10000
+```
+
+The command emits JSON with pending/ready/failed counts and oldest pending age.
+It exits nonzero when there are failed rows or the age/backlog thresholds are
+exceeded. Feed this result and publisher exit codes into your scheduler's alerting.
+Use `--connection` consistently for capture, publishing, status and retries.
+Publish and apply the additional `index_traceflow_audit_outbox` migration when
+upgrading an existing installation; it indexes ready rows and pending age.
 
 ### Manual capture
 

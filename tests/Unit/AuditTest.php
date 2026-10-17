@@ -99,4 +99,49 @@ class AuditTest extends TestCase
             }
         }
     }
+
+    public function test_envelope_free_text_and_nested_fields_follow_the_backend_contract(): void
+    {
+        $valid = ['action' => 'viewed', 'description' => str_repeat('é', 2000), 'actor' => ['type' => 'user', 'id' => '1', 'label' => str_repeat('😀', 150)], 'redacted_fields' => ['guest.phone'], 'origin' => ['channel' => 'api', 'client_source' => 'cb3', 'release' => '1.0']];
+        $this->assertSame('viewed', AuditEvent::create('test', $valid)->jsonSerialize()->action);
+        foreach ([
+            ['description' => str_repeat('a', 2001)],
+            ['description' => 42],
+            ['actor' => ['type' => 'user', 'id' => '1', 'label' => str_repeat('😀', 151)]],
+            ['actor' => ['type' => 'user', 'id' => '1', 'email' => 'x']],
+            ['redacted_fields' => ['']],
+            ['redacted_fields' => 'guest.phone'],
+            ['redacted_fields' => array_fill(0, 201, 'f')],
+            ['origin' => ['channel' => 'api', 'ip' => '10.0.0.1']],
+            ['origin' => ['channel' => 'api', 'release' => '']],
+            ['subject' => ['type' => 'x', 'id' => '1', 'name' => 'n']],
+            ['changes' => ['mode' => 'snapshot', 'before' => [], 'after' => [], 'extra' => 1]],
+        ] as $invalid) {
+            try {
+                AuditEvent::create('test', array_merge(['action' => 'viewed'], $invalid));
+                $this->fail('Expected rejection of '.json_encode($invalid));
+            } catch (\InvalidArgumentException) {
+                $this->addToAssertionCount(1);
+            }
+        }
+    }
+
+    public function test_enums_are_recorded_as_their_stored_value_or_case_name(): void
+    {
+        $diff = AuditEvent::diff(['status' => AuditTestStatus::Draft, 'kind' => AuditTestKind::Room], ['status' => AuditTestStatus::Sent, 'kind' => AuditTestKind::Room]);
+        $this->assertSame(['status' => 'draft'], json_decode(json_encode($diff['before']), true));
+        $this->assertSame(['status' => 'sent'], json_decode(json_encode($diff['after']), true));
+        $this->assertSame('"Room"', AuditEvent::canonical(AuditTestKind::Room));
+    }
+}
+
+enum AuditTestStatus: string
+{
+    case Draft = 'draft';
+    case Sent = 'sent';
+}
+
+enum AuditTestKind
+{
+    case Room;
 }

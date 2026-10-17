@@ -51,13 +51,31 @@ final class AuditEvent implements JsonSerializable
                 self::identifier($payload->{$field});
             }
         }
-        foreach (['subject', 'actor'] as $field) {
+        foreach (['subject' => ['type', 'id'], 'actor' => ['type', 'id', 'label']] as $field => $keys) {
             if (property_exists($payload, $field)) {
-                if (! is_object($payload->{$field})) {
+                if (! is_object($payload->{$field}) || array_diff(array_keys(get_object_vars($payload->{$field})), $keys)) {
                     throw new InvalidArgumentException("Invalid audit {$field}");
                 }
                 self::identifier($payload->{$field}->type ?? null);
                 self::identifier($payload->{$field}->id ?? null);
+            }
+        }
+        if (property_exists($payload, 'description')) {
+            self::text($payload->description, 2000, 'description');
+        }
+        if (property_exists($payload->actor ?? new \stdClass, 'label')) {
+            self::text($payload->actor->label, 300, 'actor.label');
+        }
+        if (property_exists($payload, 'redacted_fields')) {
+            $fields = $payload->redacted_fields;
+            if (! is_array($fields) || ! array_is_list($fields) || count($fields) > 200) {
+                throw new InvalidArgumentException('Audit redacted_fields must be a list of at most 200 field paths');
+            }
+            foreach ($fields as $path) {
+                if (! is_string($path) || $path === '') {
+                    throw new InvalidArgumentException('Audit redacted_fields must be a list of at most 200 field paths');
+                }
+                self::text($path, 300, 'redacted_fields');
             }
         }
         if (! is_string($payload->occurred_at ?? null) || ! preg_match('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/', $payload->occurred_at) || strtotime($payload->occurred_at) === false) {
@@ -68,7 +86,8 @@ final class AuditEvent implements JsonSerializable
         }
         if (property_exists($payload, 'changes')) {
             $changes = $payload->changes;
-            if (! is_object($changes) || ! in_array($changes->mode ?? null, ['delta', 'snapshot'], true) || ! is_object($changes->before ?? null) || ! is_object($changes->after ?? null)) {
+            if (! is_object($changes) || array_diff(array_keys(get_object_vars($changes)), ['mode', 'before', 'after'])
+                || ! in_array($changes->mode ?? null, ['delta', 'snapshot'], true) || ! is_object($changes->before ?? null) || ! is_object($changes->after ?? null)) {
                 throw new InvalidArgumentException('Audit changes require object images and delta or snapshot mode');
             }
             if ($payload->action === 'created' && (array) $changes->before !== [] || $payload->action === 'deleted' && (array) $changes->after !== []) {
@@ -82,10 +101,15 @@ final class AuditEvent implements JsonSerializable
             throw new InvalidArgumentException('Audit metadata must be an object');
         }
         if (property_exists($payload, 'origin')) {
-            if (! is_object($payload->origin)) {
+            if (! is_object($payload->origin) || array_diff(array_keys(get_object_vars($payload->origin)), ['channel', 'client_source', 'release'])) {
                 throw new InvalidArgumentException('Invalid audit origin');
             }
             self::identifier($payload->origin->channel ?? null);
+            foreach (['client_source', 'release'] as $field) {
+                if (property_exists($payload->origin, $field)) {
+                    self::identifier($payload->origin->{$field});
+                }
+            }
         }
         self::validateNumbers($payload);
 
@@ -97,9 +121,25 @@ final class AuditEvent implements JsonSerializable
 
     private static function identifier(mixed $value): void
     {
-        if (! is_string($value) || trim($value) === '' || strlen($value) > 200) {
-            throw new InvalidArgumentException('Audit identifiers must be non-empty strings of at most 200 bytes');
+        if (! is_string($value) || trim($value) === '' || self::utf16Length($value) > 200) {
+            throw new InvalidArgumentException('Audit identifiers must be non-empty strings of at most 200 characters');
         }
+    }
+
+    /** Free text accepted by the backend contract; the limit mirrors its character count. */
+    private static function text(mixed $value, int $max, string $field): void
+    {
+        if (! is_string($value) || self::utf16Length($value) > $max) {
+            throw new InvalidArgumentException("Audit {$field} must be a string of at most {$max} characters");
+        }
+    }
+
+    /** The backend counts UTF-16 code units, as JavaScript string length does. */
+    private static function utf16Length(string $value): int
+    {
+        $encoded = mb_convert_encoding($value, 'UTF-16LE', 'UTF-8');
+
+        return intdiv(strlen($encoded), 2);
     }
 
     private static function validateNumbers(mixed $value): void
@@ -161,7 +201,11 @@ final class AuditEvent implements JsonSerializable
         if ($depth > 32) {
             throw new InvalidArgumentException('Audit JSON exceeds depth 32');
         }
-        if ($value instanceof Arrayable) {
+        if ($value instanceof \BackedEnum) {
+            $value = $value->value;
+        } elseif ($value instanceof \UnitEnum) {
+            $value = $value->name;
+        } elseif ($value instanceof Arrayable) {
             $value = $value->toArray();
         } elseif ($value instanceof JsonSerializable) {
             $value = $value->jsonSerialize();

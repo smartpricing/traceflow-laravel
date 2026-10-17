@@ -63,6 +63,11 @@ class Quote extends Model
 }
 ```
 
+Enum casts are recorded as their backing value or case name, dates as ISO strings.
+Free text (`description`, `actor.label`, `redacted_fields`) and nested objects are
+validated against the backend contract when the event is created, so an invalid
+envelope fails the write instead of the later publish.
+
 For this model on the default connection, update it inside a transaction:
 
 ```php

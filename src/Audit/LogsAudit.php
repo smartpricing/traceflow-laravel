@@ -59,7 +59,12 @@ trait LogsAudit
         $values = [];
         foreach ($this->auditFields() as $field) {
             $value = $original ? $this->getOriginal($field) : $this->getAttribute($field);
-            if ($value instanceof Arrayable) {
+            // Enum casts must not fail the save: record the stored value or case name.
+            if ($value instanceof \BackedEnum) {
+                $value = $value->value;
+            } elseif ($value instanceof \UnitEnum) {
+                $value = $value->name;
+            } elseif ($value instanceof Arrayable) {
                 $value = $value->toArray();
             } elseif ($value instanceof JsonSerializable) {
                 $value = $value->jsonSerialize();

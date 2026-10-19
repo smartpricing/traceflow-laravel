@@ -30,16 +30,22 @@ See [config/traceflow.php](config/traceflow.php) for all settings.
 
 ## Audit model changes
 
-Deploy the backend audit API and apply its CQL schema first. Publish the outbox
-migration and run it on the same database connection as the audited models:
+Audit events travel through a [Queen MQ](https://queenmq.com) queue: the SDK
+pushes each event, and the Traceflow worker reads the queue and stores it. Enable
+the consumer on the service first (`AUDIT_QUEEN_ENABLED`, see the
+[service README](https://github.com/smartpricing/traceflow-service#delivery-through-queen))
+and install the Queen client in the application:
 
 ```sh
-php artisan vendor:publish --tag=traceflow-audit-migrations
-php artisan migrate
+composer require queen-mq/php-client
 ```
 
-For a named connection, use `php artisan migrate --database=business`. No migration
-runs automatically when the package is installed.
+```dotenv
+TRACEFLOW_AUDIT_QUEEN_URL=http://queen-mq.queen.svc.cluster.local:6632
+```
+
+The URL and token default to the application's `QUEEN_URL` and
+`QUEEN_BEARER_TOKEN`. No table or scheduled command is needed.
 
 Add `LogsAudit` and an explicit field allowlist to a model:
 
@@ -68,7 +74,7 @@ Free text (`description`, `actor.label`, `redacted_fields`) and nested objects a
 validated against the backend contract when the event is created, so an invalid
 envelope fails the write instead of the later publish.
 
-For this model on the default connection, update it inside a transaction:
+Update the model as usual; inside a transaction, the event leaves after the commit:
 
 ```php
 use Illuminate\Support\Facades\DB;
@@ -87,74 +93,29 @@ app(AuditContext::class)->run([
 });
 ```
 
-The trait captures create, update, delete and restore events. Saves, deletes and
-restores require an already-open transaction on the model's connection. The model
-write and outbox insert roll back together. Updates with no changes to selected
-fields are skipped; before/after images are captured before publishing.
+The trait captures create, update, delete and restore events. Updates with no
+changes to selected fields are skipped; before/after images are captured at the
+write.
+
+Inside a transaction, the events are pushed once the outermost transaction on the
+model's connection commits; a rollback pushes nothing. Outside a transaction, they
+are pushed right after the write. Each subject has its own partition, so Traceflow
+stores its events in order, and the event ID is the push's transaction ID, so a
+repeated push is stored once.
+
+The push happens after the write has committed. If Queen does not accept it, the
+SDK reports an `AuditDeliveryException` to the application's exception handler and
+the write stays: that event is lost. Watch those reports. A push waits at most
+`TRACEFLOW_AUDIT_QUEEN_TIMEOUT_MS` (default `2000`) per attempt, with
+`TRACEFLOW_AUDIT_QUEEN_RETRY_ATTEMPTS` (default `1`) attempts. After a failure, pushes
+from the same process fail at once for `TRACEFLOW_AUDIT_QUEEN_COOLDOWN_SECONDS`
+(default `30`, `0` disables it), so an outage does not slow every request or job item;
+those events are reported and lost too.
 
 `AuditContext::run()` scopes context to the callback and restores the previous
 context even on an exception. The trait uses the authenticated actor when none
 is supplied. Pass trusted context explicitly into queued jobs.
 Override `customizeAudit(array $event): array` to redact or enrich an event.
-
-### Writes outside transactions
-
-An application that saves models outside transactions can relax the requirement,
-for example while it replaces an activity log written from model events:
-
-```dotenv
-TRACEFLOW_AUDIT_REQUIRE_TRANSACTION=false
-```
-
-Writes inside a transaction stay atomic. A write outside a transaction stores the
-outbox row right after the model write, so a crash or database error between the
-two writes loses that event. An outbox error is then raised after the model write
-has already been committed. `AuditOutbox::record()` follows the same setting, and
-`AuditOutbox::requireTransaction()` always enforces a transaction.
-
-### Publish the outbox
-
-Run this command periodically from the application's scheduler or job runner:
-
-```sh
-php artisan traceflow:audit-publish --limit=100 --max-seconds=30 --json
-```
-
-For a named database, add `--connection=business`. Each invocation processes at
-most the requested number of ready rows and exits. Choose the frequency and
-batch size for the expected volume. `--max-seconds` bounds delivery attempts and
-HTTP timeouts for one invocation (default 30, maximum 300); database queries still
-use the application's database timeout. A transient delivery failure stops the
-batch to avoid retrying every row during an outage. Remaining rows stay pending.
-`--json` reports published, retry-scheduled and failed counts. A delivery failure
-or exhausted time budget returns a nonzero exit code.
-
-A row is deleted only after Traceflow confirms persistence. Transient failures
-retain the same event and set a later `available_at`. Missing credentials and
-HTTP `401`/`403`/`404` also retain pending rows: fixing publisher configuration or
-deploying the route must not require reconstructing audit events. Those HTTP
-responses end the current delivery attempt without immediate HTTP retries. Permanent failures set
-`failed_at` and retain the row for review. After fixing the cause, run
-`php artisan traceflow:audit-retry EVENT_ID`. It preserves the original payload,
-ID and attempt history. Investigate `409` conflicts before resending: the same
-event ID cannot describe different data.
-
-Concurrent publishers may send duplicates; Traceflow deduplicates by source and
-event ID. Audit history is read from Traceflow. The outbox holds pending or failed
-deliveries, not the history shown to users.
-
-Monitor the publisher separately from application request health:
-
-```sh
-php artisan traceflow:audit-status --max-age=300 --max-pending=10000
-```
-
-The command emits JSON with pending/ready/failed counts and oldest pending age.
-It exits nonzero when there are failed rows or the age/backlog thresholds are
-exceeded. Feed this result and publisher exit codes into your scheduler's alerting.
-Use `--connection` consistently for capture, publishing, status and retries.
-Publish and apply the additional `index_traceflow_audit_outbox` migration when
-upgrading an existing installation; it indexes ready rows and pending age.
 
 ### Manual capture
 
@@ -166,7 +127,7 @@ For example, with an existing `quotes` table on the default connection:
 use Illuminate\Support\Facades\DB;
 use Smartness\TraceFlow\Audit\AuditClient;
 use Smartness\TraceFlow\Audit\AuditEvent;
-use Smartness\TraceFlow\Audit\AuditOutbox;
+use Smartness\TraceFlow\Audit\AuditPublisher;
 
 $db = DB::connection();
 $db->transaction(function () use ($db) {
@@ -190,19 +151,19 @@ $db->transaction(function () use ($db) {
         'changes' => $changes,
         'metadata' => ['reason' => 'Discount agreed'],
     ]);
-    app(AuditOutbox::class)->record($event, $db);
+    app(AuditPublisher::class)->publishAfterCommit($event, $db);
 });
 ```
 
 Manual events take their context from the supplied payload. Obtain the actual
 before/after values within the operation; account for locking, casts and database
-triggers in the integrating application. Do not reconstruct past values in the
-publisher by reloading the current model.
+triggers in the integrating application. Do not reconstruct past values later by
+reloading the current model.
 
-`AuditClient::record($event)` sends directly and returns a persistence receipt or
-throws `AuditDeliveryException`. `recordAudit($input)` creates and sends an event
-in one call; it is also available on `TraceFlowSDK`. Direct sending alone does
-not recover an event lost between business commit and a process crash.
+`publishAfterCommit()` follows the trait's rules: it waits for the commit and
+reports failures. `publish($event)` pushes at once and throws
+`AuditDeliveryException` when Queen does not accept the event, for callers that
+handle the failure themselves. Both do nothing while `TRACEFLOW_ENABLED=false`.
 
 Subject types and IDs are strings. Missing fields differ from `null`; use decimal
 strings for exact money values. Creation uses an empty before image, deletion an
@@ -248,14 +209,13 @@ its own middleware. This propagates trace context, not `AuditContext`.
 | `TRACEFLOW_TRANSPORT=http` | Trace events use HTTP; `log` writes to Laravel's log channel. Kafka is not implemented in the PHP SDK. |
 | `TRACEFLOW_ASYNC_HTTP=true` | Default for tracing. Pending requests are flushed during shutdown; abrupt termination can lose them. |
 | `TRACEFLOW_SILENT_ERRORS=true` | Default for tracing delivery failures. Configuration and input errors can still throw. |
-| `TRACEFLOW_ENABLED=false` | Drops trace events. Audit delivery throws a retryable error, leaving outbox rows pending. |
+| `TRACEFLOW_ENABLED=false` | Drops trace events and audit events. Audit envelopes are still validated. |
 | `TRACEFLOW_TIMEOUT` | HTTP timeout in seconds; default `5`. |
 | `TRACEFLOW_MAX_RETRIES` | Default `3`. |
 | `TRACEFLOW_RETRY_DELAY` | Initial retry delay in milliseconds; default `1000`. |
 
-Audit always uses synchronous HTTP and explicit errors, regardless of the tracing
-transport, `async_http` or `silent_errors`. Disabling delivery does not disable
-model capture or its transaction requirement.
+Audit events always go through Queen, regardless of the tracing transport,
+`async_http` or `silent_errors`.
 
 For local trace logs, set `TRACEFLOW_TRANSPORT=log` and choose
 `TRACEFLOW_LOG_CHANNEL` / `TRACEFLOW_LOG_LEVEL`. These settings do not redirect
@@ -276,7 +236,7 @@ composer format:check
 Run the audit tests without an application database:
 
 ```sh
-vendor/bin/phpunit tests/Unit/AuditTest.php tests/Unit/AuditOutboxTest.php
+vendor/bin/phpunit tests/Unit/AuditTest.php tests/Unit/AuditPublisherTest.php
 ```
 
 Optional compatibility check against installed Laravel classes, using isolated

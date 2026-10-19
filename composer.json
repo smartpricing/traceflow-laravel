@@ -2,7 +2,7 @@
     "name": "smartness/traceflow-laravel",
     "description": "Production-ready distributed tracing SDK for Laravel with event-sourced architecture, async HTTP transport, and cross-service context propagation",
     "type": "library",
-    "version": "2.8.0",
+    "version": "2.9.0",
     "keywords": [
         "laravel",
         "tracing",
@@ -46,7 +46,8 @@
         "mockery/mockery": "^1.6"
     },
     "suggest": {
-        "enqueue/rdkafka": "Required for Kafka transport support (^0.10)"
+        "enqueue/rdkafka": "Required for Kafka transport support (^0.10)",
+        "queen-mq/php-client": "Required to deliver audit events to Traceflow (^2.4)"
     },
     "autoload": {
         "psr-4": {

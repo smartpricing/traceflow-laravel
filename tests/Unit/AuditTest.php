@@ -2,15 +2,8 @@
 
 namespace Smartness\TraceFlow\Tests\Unit;
 
-use GuzzleHttp\Client;
-use GuzzleHttp\Handler\MockHandler;
-use GuzzleHttp\HandlerStack;
-use GuzzleHttp\Middleware;
-use GuzzleHttp\Psr7\Response;
 use PHPUnit\Framework\TestCase;
-use Smartness\TraceFlow\Audit\AuditClient;
 use Smartness\TraceFlow\Audit\AuditContext;
-use Smartness\TraceFlow\Audit\AuditDeliveryException;
 use Smartness\TraceFlow\Audit\AuditEvent;
 
 class AuditTest extends TestCase
@@ -27,30 +20,6 @@ class AuditTest extends TestCase
         $this->assertSame([], (array) AuditEvent::diff(['value' => 1], ['value' => 1.0])['after']);
     }
 
-    public function test_delivery_retries_identical_payload_and_returns_receipt(): void
-    {
-        $event = AuditEvent::create('test', ['action' => 'viewed', 'metadata' => ['count' => 0]]);
-        $history = [];
-        $handler = HandlerStack::create(new MockHandler([new Response(503), new Response(201, [], json_encode(['status' => 'persisted', 'event_id' => $event->id()]))]));
-        $handler->push(Middleware::history($history));
-        $client = new AuditClient(['source' => 'test', 'endpoint' => 'http://audit.test', 'api_key' => 'key', 'retry_delay' => 0], new Client(['handler' => $handler]));
-        $this->assertSame('persisted', $client->record($event)['status']);
-        $this->assertCount(2, $history);
-        $this->assertSame((string) $history[0]['request']->getBody(), (string) $history[1]['request']->getBody());
-    }
-
-    public function test_conflict_is_not_retried(): void
-    {
-        $client = new AuditClient(['source' => 'test', 'endpoint' => 'http://audit.test', 'api_key' => 'key'], new Client(['handler' => HandlerStack::create(new MockHandler([new Response(409)]))]));
-        try {
-            $client->recordAudit(['action' => 'viewed']);
-            $this->fail('Expected conflict');
-        } catch (AuditDeliveryException $error) {
-            $this->assertFalse($error->retryable);
-            $this->assertSame(409, $error->statusCode);
-        }
-    }
-
     public function test_context_is_restored_even_after_an_exception(): void
     {
         $context = new AuditContext;
@@ -62,42 +31,6 @@ class AuditTest extends TestCase
         } catch (\RuntimeException) {
         }
         $this->assertSame([], $context->values());
-    }
-
-    public function test_publisher_deadline_caps_http_timeout_and_does_not_sleep_past_budget(): void
-    {
-        $event = AuditEvent::create('test', ['action' => 'viewed']);
-        $history = [];
-        $handler = HandlerStack::create(new MockHandler([new Response(503)]));
-        $handler->push(Middleware::history($history));
-        $client = new AuditClient(['source' => 'test', 'endpoint' => 'http://audit.test', 'api_key' => 'key', 'retry_delay' => 30000], new Client(['handler' => $handler]));
-        $start = microtime(true);
-        try {
-            $client->record($event, 0.1);
-            $this->fail('Expected retryable delivery failure');
-        } catch (AuditDeliveryException $error) {
-            $this->assertTrue($error->retryable);
-        }
-        $this->assertLessThan(1, microtime(true) - $start);
-        $this->assertCount(1, $history);
-        $this->assertLessThanOrEqual(0.1, $history[0]['options']['timeout']);
-        $this->assertFalse($history[0]['options']['allow_redirects']);
-    }
-
-    public function test_authentication_and_missing_route_failures_remain_recoverable_without_immediate_retries(): void
-    {
-        foreach ([401, 403, 404] as $status) {
-            $mock = new MockHandler([new Response($status)]);
-            $client = new AuditClient(['source' => 'test', 'endpoint' => 'http://audit.test', 'api_key' => 'key'], new Client(['handler' => HandlerStack::create($mock)]));
-            try {
-                $client->recordAudit(['action' => 'viewed']);
-                $this->fail('Expected delivery failure');
-            } catch (AuditDeliveryException $error) {
-                $this->assertTrue($error->retryable);
-                $this->assertSame($status, $error->statusCode);
-                $this->assertSame(0, $mock->count());
-            }
-        }
     }
 
     public function test_envelope_free_text_and_nested_fields_follow_the_backend_contract(): void

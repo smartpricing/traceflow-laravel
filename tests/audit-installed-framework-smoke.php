@@ -5,12 +5,15 @@ use Illuminate\Config\Repository;
 use Illuminate\Container\Container;
 use Illuminate\Contracts\Auth\Factory;
 use Illuminate\Database\Capsule\Manager;
+use Illuminate\Database\DatabaseTransactionsManager;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Events\Dispatcher;
 use Illuminate\Foundation\Application;
 use Illuminate\Support\Facades\Facade;
 use Smartness\TraceFlow\Audit\AuditClient;
 use Smartness\TraceFlow\Audit\AuditContext;
+use Smartness\TraceFlow\Audit\AuditPublisher;
 use Smartness\TraceFlow\Audit\LogsAudit;
 
 // Compatibility test using already installed framework classes, without booting
@@ -44,27 +47,62 @@ $app->alias('auth', Factory::class);
 Facade::setFacadeApplication($app);
 $app->scoped(AuditContext::class, fn () => new AuditContext);
 $app->instance(AuditClient::class, new AuditClient(['source' => 'compatibility-test']));
+// Captures pushes instead of contacting a broker.
+$pushes = [];
+$queen = new class($pushes)
+{
+    public function __construct(private array &$pushes) {}
+
+    public function queue(string $name): object
+    {
+        $pushes = &$this->pushes;
+
+        return new class($pushes)
+        {
+            public function __construct(private array &$pushes) {}
+
+            public function partition(string $partition): static
+            {
+                return $this;
+            }
+
+            public function push(array $items): object
+            {
+                $pushes = &$this->pushes;
+
+                return new class($pushes, $items)
+                {
+                    public function __construct(private array &$pushes, private array $items) {}
+
+                    public function execute(): array
+                    {
+                        foreach ($this->items as $item) {
+                            $this->pushes[] = json_decode(json_encode($item['data']));
+                        }
+
+                        return [['status' => 'queued']];
+                    }
+                };
+            }
+        };
+    }
+};
+$app->instance(AuditPublisher::class, new AuditPublisher(['enabled' => true], fn () => $queen));
 $capsule = new Manager($app);
 $capsule->addConnection(['driver' => 'sqlite', 'database' => ':memory:', 'prefix' => '']);
 $capsule->setAsGlobal();
 $capsule->bootEloquent();
 $db = $capsule->getConnection();
+$db->setTransactionManager(new DatabaseTransactionsManager);
 $db->getSchemaBuilder()->create('audit_subjects', function ($table) {
     $table->id();
     $table->string('status');
     $table->softDeletes();
 });
-$db->getSchemaBuilder()->create('traceflow_audit_outbox', function ($table) {
-    $table->uuid('event_id')->primary();
-    $table->text('payload');
-    $table->timestamp('created_at');
-    $table->timestamp('available_at');
-    $table->integer('attempts');
-});
 
 class InstalledFrameworkAuditSubject extends Model
 {
-    use Illuminate\Database\Eloquent\SoftDeletes, LogsAudit;
+    use LogsAudit, SoftDeletes;
 
     protected $table = 'audit_subjects';
 
@@ -92,7 +130,7 @@ try {
         throw $error;
     }
 }
-$events = $db->table('traceflow_audit_outbox')->get()->map(fn ($row) => json_decode($row->payload));
+$events = collect($pushes);
 if ($events->count() !== 4 || InstalledFrameworkAuditSubject::count() !== 1) {
     throw new RuntimeException('Transactional audit compatibility failed');
 }
@@ -100,4 +138,4 @@ $updated = $events->first(fn ($event) => $event->action === 'updated');
 if ($updated->changes->before->status !== 'draft' || $updated->changes->after->status !== 'sent') {
     throw new RuntimeException('Audit image compatibility failed');
 }
-echo 'Laravel '.Application::VERSION.": create/update/delete/restore, frozen images and rollback passed on isolated SQLite\n";
+echo 'Laravel '.Application::VERSION.": create/update/delete/restore, frozen images, publish after commit and rollback passed on isolated SQLite\n";

@@ -106,22 +106,29 @@ return [
 
     /*
     |--------------------------------------------------------------------------
-    | Audit Configuration
+    | Audit Delivery
     |--------------------------------------------------------------------------
     |
-    | require_transaction: when true (default), audited model writes and manual
-    | outbox records must run inside an explicit transaction, so the business
-    | write and its outbox row commit or roll back together.
+    | Audit events are pushed to a Queen MQ queue that the Traceflow worker
+    | reads (AUDIT_QUEEN_ENABLED on the service). Requires queen-mq/php-client.
     |
-    | When false, a write outside a transaction stores the outbox row right
-    | after the model write. A crash or database error between the two writes
-    | loses that event. Writes inside a transaction stay atomic in both modes.
-    | Use false to adopt auditing in an application that saves models outside
-    | transactions, with the same guarantee as an activity log written from
-    | model events.
+    | A model write inside a transaction publishes after the commit, and a
+    | rolled-back write publishes nothing. A push that fails after the write
+    | has committed is reported to the exception handler: that event is lost.
+    | The URL and token default to the application's QUEEN_URL and
+    | QUEEN_BEARER_TOKEN. A push waits at most timeout_ms per attempt. After a
+    | failure, pushes from the same process fail at once for cooldown_seconds
+    | (0 disables it), so an outage does not slow every request.
     |
     */
     'audit' => [
-        'require_transaction' => env('TRACEFLOW_AUDIT_REQUIRE_TRANSACTION', true),
+        'queen' => [
+            'url' => env('TRACEFLOW_AUDIT_QUEEN_URL', env('QUEEN_URL')),
+            'bearer_token' => env('TRACEFLOW_AUDIT_QUEEN_BEARER_TOKEN', env('QUEEN_BEARER_TOKEN')),
+            'queue' => env('TRACEFLOW_AUDIT_QUEEN_QUEUE', 'traceflow.audit'),
+            'timeout_ms' => env('TRACEFLOW_AUDIT_QUEEN_TIMEOUT_MS', 2000),
+            'retry_attempts' => env('TRACEFLOW_AUDIT_QUEEN_RETRY_ATTEMPTS', 1),
+            'cooldown_seconds' => env('TRACEFLOW_AUDIT_QUEEN_COOLDOWN_SECONDS', 30),
+        ],
     ],
 ];

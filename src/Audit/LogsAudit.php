@@ -28,11 +28,11 @@ trait LogsAudit
     public static function bootLogsAudit(): void
     {
         static::saving(function ($model) {
-            AuditOutbox::requireTransaction($model->getConnection());
+            AuditOutbox::guardTransaction($model->getConnection());
             $model->traceflowAuditBefore = $model->auditSnapshot(true);
         });
         static::deleting(function ($model) {
-            AuditOutbox::requireTransaction($model->getConnection());
+            AuditOutbox::guardTransaction($model->getConnection());
             $model->traceflowAuditBefore = $model->auditSnapshot();
         });
         static::created(fn ($model) => $model->writeAudit('created', [], $model->auditSnapshot()));
@@ -44,7 +44,7 @@ trait LogsAudit
         static::deleted(fn ($model) => $model->writeAudit('deleted', $model->traceflowAuditBefore, []));
         if (method_exists(static::class, 'restoring')) {
             static::restoring(function ($model) {
-                AuditOutbox::requireTransaction($model->getConnection());
+                AuditOutbox::guardTransaction($model->getConnection());
                 $model->traceflowAuditRestoring = true;
             });
             static::restored(function ($model) {

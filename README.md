@@ -97,6 +97,21 @@ context even on an exception. The trait uses the authenticated actor when none
 is supplied. Pass trusted context explicitly into queued jobs.
 Override `customizeAudit(array $event): array` to redact or enrich an event.
 
+### Writes outside transactions
+
+An application that saves models outside transactions can relax the requirement,
+for example while it replaces an activity log written from model events:
+
+```dotenv
+TRACEFLOW_AUDIT_REQUIRE_TRANSACTION=false
+```
+
+Writes inside a transaction stay atomic. A write outside a transaction stores the
+outbox row right after the model write, so a crash or database error between the
+two writes loses that event. An outbox error is then raised after the model write
+has already been committed. `AuditOutbox::record()` follows the same setting, and
+`AuditOutbox::requireTransaction()` always enforces a transaction.
+
 ### Publish the outbox
 
 Run this command periodically from the application's scheduler or job runner:

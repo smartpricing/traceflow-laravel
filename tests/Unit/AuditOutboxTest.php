@@ -14,6 +14,7 @@ use Illuminate\Support\Facades\Schema;
 use Orchestra\Testbench\TestCase;
 use Smartness\TraceFlow\Audit\AuditClient;
 use Smartness\TraceFlow\Audit\AuditContext;
+use Smartness\TraceFlow\Audit\AuditOutbox;
 use Smartness\TraceFlow\Audit\LogsAudit;
 use Smartness\TraceFlow\TraceFlowServiceProvider;
 
@@ -68,6 +69,52 @@ class AuditOutboxTest extends TestCase
             $this->assertStringContainsString('transaction', $error->getMessage());
         }
         $this->assertSame(0, AuditTestSubject::count());
+    }
+
+    public function test_optional_transactions_record_unwrapped_model_writes(): void
+    {
+        config(['traceflow.audit.require_transaction' => false]);
+        $model = AuditTestSubject::create(['status' => 'draft']);
+        $model->update(['status' => 'sent']);
+        $model->delete();
+        $model->restore();
+        $events = DB::table('traceflow_audit_outbox')->get()->map(fn ($row) => json_decode($row->payload));
+        $actions = $events->pluck('action')->sort()->values()->all();
+        $this->assertSame(['created', 'deleted', 'restored', 'updated'], $actions);
+        $updated = $events->firstWhere('action', 'updated');
+        $this->assertSame('draft', $updated->changes->before->status);
+        $this->assertSame('sent', $updated->changes->after->status);
+    }
+
+    public function test_optional_transactions_keep_wrapped_writes_atomic(): void
+    {
+        config(['traceflow.audit.require_transaction' => false]);
+        try {
+            DB::transaction(function () {
+                AuditTestSubject::create(['status' => 'draft']);
+                throw new \RuntimeException('rollback');
+            });
+        } catch (\RuntimeException) {
+        }
+        $this->assertSame(0, AuditTestSubject::count());
+        $this->assertSame(0, DB::table('traceflow_audit_outbox')->count());
+    }
+
+    public function test_manual_records_follow_the_configured_policy(): void
+    {
+        $event = app(AuditClient::class)->createEvent(['subject' => ['type' => 'quote', 'id' => '1'], 'action' => 'exported']);
+        try {
+            app(AuditOutbox::class)->record($event, DB::connection());
+            $this->fail('Expected transaction requirement');
+        } catch (\LogicException) {
+        }
+        $this->assertSame(0, DB::table('traceflow_audit_outbox')->count());
+        config(['traceflow.audit.require_transaction' => false]);
+        app(AuditOutbox::class)->record($event, DB::connection());
+        $this->assertSame(1, DB::table('traceflow_audit_outbox')->count());
+        // The explicit check keeps enforcing a transaction for callers that rely on it.
+        $this->expectException(\LogicException::class);
+        AuditOutbox::requireTransaction(DB::connection());
     }
 
     public function test_model_changes_are_frozen_and_only_selected_fields_are_audited(): void

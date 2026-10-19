@@ -103,4 +103,25 @@ return [
     'queue' => [
         'propagate_context' => env('TRACEFLOW_QUEUE_PROPAGATE', true),
     ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Audit Configuration
+    |--------------------------------------------------------------------------
+    |
+    | require_transaction: when true (default), audited model writes and manual
+    | outbox records must run inside an explicit transaction, so the business
+    | write and its outbox row commit or roll back together.
+    |
+    | When false, a write outside a transaction stores the outbox row right
+    | after the model write. A crash or database error between the two writes
+    | loses that event. Writes inside a transaction stay atomic in both modes.
+    | Use false to adopt auditing in an application that saves models outside
+    | transactions, with the same guarantee as an activity log written from
+    | model events.
+    |
+    */
+    'audit' => [
+        'require_transaction' => env('TRACEFLOW_AUDIT_REQUIRE_TRANSACTION', true),
+    ],
 ];

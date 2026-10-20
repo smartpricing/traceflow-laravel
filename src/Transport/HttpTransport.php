@@ -1,0 +1,51 @@
+<?php
+
+namespace Smartness\TraceFlow\Transport;
+
+use GuzzleHttp\Exception\GuzzleException;
+
+class HttpTransport extends AbstractHttpTransport
+{
+    protected function dispatch(string $method, string $uri, array $payload, ?string $orderKey = null): void
+    {
+        // Synchronous transport blocks per request, so requests are already
+        // ordered by call order; $orderKey is not needed here.
+        $this->executeWithRetry($method, $uri, $payload);
+    }
+
+    protected function logPrefix(): string
+    {
+        return '[TraceFlow HTTP]';
+    }
+
+    private function executeWithRetry(string $method, string $uri, array $data, int $attempt = 0): void
+    {
+        try {
+            $this->client->request($method, $uri, ['json' => $data]);
+        } catch (GuzzleException $e) {
+            // The entity already exists (e.g. a trace_id shared across services).
+            // Treat as success — nothing to retry, nothing to fail.
+            if ($this->isBenignConflict($e)) {
+                return;
+            }
+
+            if ($attempt < $this->maxRetries && $this->isRetryable($e)) {
+                usleep($this->retryDelay * 1000 * (int) pow(2, $attempt));
+                $this->executeWithRetry($method, $uri, $data, $attempt + 1);
+            } else {
+                $this->recordFailure();
+                throw $e;
+            }
+        }
+    }
+
+    public function flush(): void
+    {
+        $this->drainQueue();
+    }
+
+    public function shutdown(): void
+    {
+        $this->drainQueue();
+    }
+}

@@ -1,0 +1,82 @@
+<?php
+
+require_once __DIR__.'/vendor/autoload.php';
+
+use Smartness\TraceFlow\TraceFlowSDK;
+
+echo "Testing TraceFlow SDK with live service...\n";
+echo "=========================================\n\n";
+
+// Initialize SDK with your credentials
+$sdk = new TraceFlowSDK([
+    'transport' => 'http',
+    'async_http' => false,  // Use async for better performance
+    'source' => 'test-script',
+    'endpoint' => 'http://localhost:3009',
+    'api_key' => 'YOUR_API_KEY_HERE',  // Replace with your actual API key
+    'timeout' => 10.0,
+    'max_retries' => 3,
+    'silent_errors' => false,  // Show errors during testing
+]);
+
+echo "1. Starting a new trace...\n";
+$trace = $sdk->startTrace(
+    title: 'Live SDK Test',
+    metadata: [
+        'test_type' => 'integration',
+        'timestamp' => date('Y-m-d H:i:s'),
+    ]
+);
+echo "   ✓ Trace started with ID: {$trace->traceId}\n\n";
+
+echo "2. Creating a step...\n";
+$step1 = $trace->startStep(
+    name: 'Data Processing',
+    metadata: ['operation' => 'test']
+);
+echo "   ✓ Step started with ID: {$step1->stepId}\n\n";
+
+// Simulate some work
+echo "3. Simulating work (sleeping 1 second)...\n";
+sleep(1);
+
+echo "4. Logging some information...\n";
+$trace->log(
+    message: 'Processing test data',
+    level: 'info',
+    details: ['items_processed' => 42]
+);
+echo "   ✓ Log emitted\n\n";
+
+echo "5. Finishing the step...\n";
+$step1->finish([
+    'result' => 'success',
+    'duration_ms' => 1000,
+]);
+echo "   ✓ Step finished\n\n";
+
+echo "6. Creating another step...\n";
+$step2 = $trace->startStep(
+    name: 'Validation',
+    metadata: ['validator' => 'schema-v1']
+);
+echo "   ✓ Step started with ID: {$step2->stepId}\n\n";
+
+echo "7. Finishing second step...\n";
+$step2->finish(['validated' => true]);
+echo "   ✓ Step finished\n\n";
+
+echo "8. Finishing the trace...\n";
+$trace->finish([
+    'total_steps' => 2,
+    'status' => 'completed',
+]);
+echo "   ✓ Trace finished\n\n";
+
+echo "9. Flushing async events...\n";
+$sdk->flush();
+echo "   ✓ All events sent to server\n\n";
+
+echo "=========================================\n";
+echo "✓ Test completed successfully!\n";
+echo "Check your TraceFlow dashboard for trace ID: {$trace->traceId}\n";

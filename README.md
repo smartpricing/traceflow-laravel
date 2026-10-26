@@ -165,6 +165,15 @@ reports failures. `publish($event)` pushes at once and throws
 `AuditDeliveryException` when Queen does not accept the event, for callers that
 handle the failure themselves. Both do nothing while `TRACEFLOW_ENABLED=false`.
 
+For bulk operations, use `publishBatch($events)` or
+`publishBatchAfterCommit($events, $db)`, with a list of `AuditEvent` objects. Requests
+contain at most 100 events and approximately 512 KiB of serialized items. Each event
+keeps its own subject partition and transaction ID; no combined event envelope is created.
+The after-commit variant registers one callback and publishes nothing on rollback.
+If a request fails or is only partly accepted, retry with the **same original events**:
+earlier batches may already be accepted, and unchanged IDs make retries idempotent.
+As with single-event publication, after-commit failures are reported and are not durably retried.
+
 Subject types and IDs are strings. Missing fields differ from `null`; use decimal
 strings for exact money values. Creation uses an empty before image, deletion an
 empty after image. Custom activities can omit changes. Select fields and redact

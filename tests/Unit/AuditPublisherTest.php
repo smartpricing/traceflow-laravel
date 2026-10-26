@@ -173,6 +173,57 @@ class AuditPublisherTest extends TestCase
         $this->assertCount(1, $this->queen->pushes);
     }
 
+    public function test_bulk_publication_chunks_requests_preserving_ids_partitions_and_order(): void
+    {
+        $events = array_map(fn ($i) => AuditEvent::create('test', ['action' => 'exported', 'subject' => ['type' => 'order', 'id' => (string) ($i % 3)]]), range(1, 205));
+        app(AuditPublisher::class)->publishBatch($events);
+        $this->assertSame([100, 100, 5], $this->queen->sizes);
+        $this->assertSame(array_map(fn ($e) => $e->id(), $events), array_column($this->queen->pushes, 'transactionId'));
+        foreach ($events as $i => $event) {
+            $this->assertSame(AuditPublisher::partitionFor($event), $this->queen->pushes[$i]['partition']);
+        }
+    }
+
+    public function test_bulk_requests_are_bounded_by_bytes_and_empty_batches_do_nothing(): void
+    {
+        $event = AuditEvent::create('test', ['action' => 'exported', 'metadata' => ['value' => str_repeat('x', 180000)]]);
+        $publisher = app(AuditPublisher::class);
+        $publisher->publishBatch([]);
+        $this->assertSame(0, $this->queen->calls);
+        $publisher->publishBatch([$event, $event, $event]);
+        $this->assertSame([2, 1], $this->queen->sizes);
+    }
+
+    public function test_bulk_after_commit_waits_and_rollback_discards_the_whole_batch(): void
+    {
+        $events = array_map(fn ($i) => AuditEvent::create('test', ['action' => 'exported']), range(1, 3));
+        $publisher = app(AuditPublisher::class);
+        DB::beginTransaction();
+        $publisher->publishBatchAfterCommit($events);
+        $this->assertSame([], $this->queen->pushes);
+        DB::rollBack();
+        $this->assertSame([], $this->queen->pushes);
+        DB::transaction(fn () => $publisher->publishBatchAfterCommit($events));
+        $this->assertSame([3], $this->queen->sizes);
+    }
+
+    public function test_partial_and_incomplete_bulk_responses_are_failures(): void
+    {
+        $events = [AuditEvent::create('test', ['action' => 'exported']), AuditEvent::create('test', ['action' => 'exported'])];
+        foreach ([[['status' => 'queued']], [['status' => 'queued'], ['status' => 'failed', 'error' => 'refused']]] as $response) {
+            $this->queen->response = $response;
+            try {
+                app(AuditPublisher::class)->publishBatch($events);
+                $this->fail('Partial acceptance must not be reported as success');
+            } catch (AuditDeliveryException $error) {
+                $this->assertTrue($error->retryable);
+                $this->assertSame($events[0]->id(), $error->eventId);
+            }
+        }
+        $this->queen->response = [['status' => 'duplicate'], ['status' => 'queued']];
+        app(AuditPublisher::class)->publishBatch($events);
+    }
+
     private function expectDeliveryFailure(AuditPublisher $publisher, AuditEvent $event, string $reason): void
     {
         try {
@@ -237,6 +288,10 @@ final class FakeQueen
 
     public int $calls = 0;
 
+    public ?array $response = null;
+
+    public array $sizes = [];
+
     public function queue(string $name): object
     {
         $this->calls++;
@@ -265,12 +320,16 @@ final class FakeQueen
                         if ($this->queen->failure !== null) {
                             throw $this->queen->failure;
                         }
+                        $this->queen->sizes[] = count($this->items);
+                        if ($this->queen->response !== null) {
+                            return $this->queen->response;
+                        }
                         foreach ($this->items as $item) {
                             $json = json_encode($item['data'], JSON_THROW_ON_ERROR);
-                            $this->queen->pushes[] = ['queue' => $this->name, 'partition' => $this->partition, 'transactionId' => $item['transactionId'], 'json' => $json, 'data' => json_decode($json)];
+                            $this->queen->pushes[] = ['queue' => $this->name, 'partition' => $item['partition'] ?? $this->partition, 'transactionId' => $item['transactionId'], 'json' => $json, 'data' => json_decode($json)];
                         }
 
-                        return [['status' => 'queued']];
+                        return array_fill(0, count($this->items), ['status' => 'queued']);
                     }
                 };
             }

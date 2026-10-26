@@ -12,15 +12,11 @@ use Throwable;
 
 /**
  * Delivers audit events to the Traceflow worker through a Queen MQ queue
- * (traceflow.audit.queen). Each subject has its own partition, so its events
- * are stored in order; the event ID is the transaction ID, so a repeated push
- * is stored once.
+ * (traceflow.audit.queen). Single events hash their subject into 64 partitions; bulk calls put
+ * bounded groups of snapshots in one message, with stable IDs for retries.
  */
 final class AuditPublisher
 {
-    /** Queue and partition names share a budget of 411 bytes on the broker. */
-    private const MAX_PARTITION_BYTES = 200;
-
     private const MAX_BATCH_COUNT = 100;
 
     private const MAX_BATCH_BYTES = 512 * 1024;
@@ -49,7 +45,7 @@ final class AuditPublisher
     }
 
     /**
-     * Push bounded batches with each event's original partition and transaction ID.
+     * Push bounded envelopes, each containing up to 100 original events.
      * On failure, retry the original events: some earlier batches may already be accepted.
      *
      * @param  list<AuditEvent>  $events
@@ -59,30 +55,44 @@ final class AuditPublisher
         if (($this->config['enabled'] ?? true) === false || $events === []) {
             return;
         }
-        $items = array_map(static fn (AuditEvent $event): array => [
-            'partition' => self::partitionFor($event),
-            'transactionId' => $event->id(),
-            'data' => $event->jsonSerialize(),
-        ], $events);
+        $events = array_values($events);
+        if (count($events) === 1) {
+            $event = $events[0];
+            $this->push([['partition' => self::partitionFor($event), 'transactionId' => $event->id(), 'data' => $event->jsonSerialize()]], $event->id());
+
+            return;
+        }
+        // Keep an operation's chunks ordered without creating a partition per subject.
+        $key = $events[0]->jsonSerialize()->batch_id ?? $events[0]->id();
+        $partition = sprintf('audit:%02x', hexdec(substr(hash('sha256', $key), 0, 2)) & 63);
         $batch = [];
-        $bytes = 0;
-        foreach ($items as $item) {
-            $size = strlen(json_encode($item, JSON_THROW_ON_ERROR));
+        $overhead = strlen(json_encode(['schema_version' => 1, 'kind' => 'audit_batch', 'events' => []], JSON_THROW_ON_ERROR));
+        $bytes = $overhead;
+        foreach ($events as $event) {
+            $item = $event->jsonSerialize();
+            $size = strlen(json_encode($item, JSON_THROW_ON_ERROR)) + 1;
             if ($batch !== [] && (count($batch) >= self::MAX_BATCH_COUNT || $bytes + $size > self::MAX_BATCH_BYTES)) {
-                $this->push($batch);
+                $this->pushEnvelope($batch, $partition);
                 $batch = [];
-                $bytes = 0;
+                $bytes = $overhead;
             }
             $batch[] = $item;
             $bytes += $size;
         }
-        $this->push($batch);
+        $this->pushEnvelope($batch, $partition);
+    }
+
+    /** @param list<object> $events */
+    private function pushEnvelope(array $events, string $partition): void
+    {
+        $data = (object) ['schema_version' => 1, 'kind' => 'audit_batch', 'events' => $events];
+        $id = 'audit-batch:'.hash('sha256', json_encode($data, JSON_THROW_ON_ERROR));
+        $this->push([['partition' => $partition, 'transactionId' => $id, 'data' => $data]], $events[0]->event_id);
     }
 
     /** @param list<array{partition: string, transactionId: string, data: object}> $items */
-    private function push(array $items): void
+    private function push(array $items, string $eventId): void
     {
-        $eventId = $items[0]['transactionId'];
         $settings = $this->settings();
         if ($this->unavailableUntil !== null && microtime(true) < $this->unavailableUntil) {
             throw new AuditDeliveryException('Queen failed a recent audit push; this event was not sent', $eventId, true);
@@ -147,16 +157,13 @@ final class AuditPublisher
         $deliver();
     }
 
-    /** One partition per subject; long keys are hashed to fit the broker's name budget. */
+    /** Fixed transport shards; subjects remain searchable in Traceflow's history indexes. */
     public static function partitionFor(AuditEvent $event): string
     {
         $subject = $event->jsonSerialize()->subject ?? null;
-        if (! is_object($subject)) {
-            return 'Default';
-        }
-        $key = $subject->type.':'.$subject->id;
+        $key = $event->jsonSerialize()->source.':'.(is_object($subject) ? $subject->type.':'.$subject->id : 'Default');
 
-        return strlen($key) <= self::MAX_PARTITION_BYTES ? $key : 'sha256:'.hash('sha256', $key);
+        return sprintf('audit:%02x', hexdec(substr(hash('sha256', $key), 0, 2)) & 63);
     }
 
     /** @return array<string, mixed> */

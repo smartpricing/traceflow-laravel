@@ -99,9 +99,9 @@ write.
 
 Inside a transaction, the events are pushed once the outermost transaction on the
 model's connection commits; a rollback pushes nothing. Outside a transaction, they
-are pushed right after the write. Each subject has its own partition, so Traceflow
-stores its events in order, and the event ID is the push's transaction ID, so a
-repeated push is stored once.
+are pushed right after the write. Single events hash their subject into one of
+64 transport partitions and use the event ID as the push transaction ID, so a
+repeated push is stored once. Bulk delivery is described below.
 
 The push happens after the write has committed. If Queen does not accept it, the
 SDK reports an `AuditDeliveryException` to the application's exception handler and
@@ -166,13 +166,29 @@ reports failures. `publish($event)` pushes at once and throws
 handle the failure themselves. Both do nothing while `TRACEFLOW_ENABLED=false`.
 
 For bulk operations, use `publishBatch($events)` or
-`publishBatchAfterCommit($events, $db)`, with a list of `AuditEvent` objects. Requests
-contain at most 100 events and approximately 512 KiB of serialized items. Each event
-keeps its own subject partition and transaction ID; no combined event envelope is created.
+`publishBatchAfterCommit($events, $db)`, with a list of `AuditEvent` objects.
+Each Queen message contains an `audit_batch` envelope with at most **100 events
+and 512 KiB of JSON**, preserving each event's ID and snapshot. For example,
+10,000 small events produce 100 messages, not 10,000. A single-event call keeps
+the original `audit` payload format.
+
+The publisher uses **64 fixed transport partitions**. All chunks of one bulk call
+use the same partition (derived from `batch_id`, or its first event ID); single
+calls hash their source and subject. This preserves order within a bulk call, but
+does not guarantee subject order across independent bulk operations. Traceflow
+orders entity history by the event timestamp and ID, independently of partitions.
+
+**Deploy the Traceflow consumer with `audit_batch` support before upgrading to
+SDK 2.11.** It accepts both payload formats, validates the entire envelope before
+writing, and acknowledges it only after every event is durable. A storage failure
+retries the envelope; events already saved are deduplicated. Invalid envelopes or
+permanent event conflicts go to the dead-letter queue for inspection.
+
 The after-commit variant registers one callback and publishes nothing on rollback.
-If a request fails or is only partly accepted, retry with the **same original events**:
-earlier batches may already be accepted, and unchanged IDs make retries idempotent.
-As with single-event publication, after-commit failures are reported and are not durably retried.
+If delivery fails, retry with the **same original events**: earlier chunks may
+already be accepted, and stable envelope and event IDs make retries idempotent.
+After-commit failures are reported and are not durably retried. Internal archival
+still uses individual events; envelope batching reduces messages on the ingress queue.
 
 Subject types and IDs are strings. Missing fields differ from `null`; use decimal
 strings for exact money values. Creation uses an empty before image, deletion an

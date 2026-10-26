@@ -90,7 +90,7 @@ class AuditPublisherTest extends TestCase
         $this->assertSame(['created', 'updated', 'deleted', 'restored'], array_map(fn ($push) => $push['data']->action, $this->queen->pushes));
         foreach ($this->queen->pushes as $push) {
             $this->assertSame('traceflow.audit', $push['queue']);
-            $this->assertSame('custom-subject:'.$model->id, $push['partition']);
+            $this->assertMatchesRegularExpression('/^audit:[0-3][0-9a-f]$/', $push['partition']);
             $this->assertSame($push['data']->event_id, $push['transactionId']);
             $this->assertSame('audit-test', $push['data']->source);
         }
@@ -150,7 +150,7 @@ class AuditPublisherTest extends TestCase
         (new AuditPublisher(array_merge(config('traceflow'), ['enabled' => false]), fn () => $this->queen))->publish($event);
         $this->assertSame([], $this->queen->pushes);
         app(AuditPublisher::class)->publish($event);
-        $this->assertSame('quote:1', $this->queen->pushes[0]['partition']);
+        $this->assertSame(AuditPublisher::partitionFor($event), $this->queen->pushes[0]['partition']);
     }
 
     public function test_after_a_failure_pushes_fail_at_once_until_the_cooldown_ends(): void
@@ -173,15 +173,33 @@ class AuditPublisherTest extends TestCase
         $this->assertCount(1, $this->queen->pushes);
     }
 
-    public function test_bulk_publication_chunks_requests_preserving_ids_partitions_and_order(): void
+    public function test_ten_thousand_snapshots_become_one_hundred_messages(): void
     {
-        $events = array_map(fn ($i) => AuditEvent::create('test', ['action' => 'exported', 'subject' => ['type' => 'order', 'id' => (string) ($i % 3)]]), range(1, 205));
+        $events = array_map(fn ($i) => AuditEvent::create('test', ['action' => 'exported', 'subject' => ['type' => 'order', 'id' => (string) $i]]), range(1, 10000));
         app(AuditPublisher::class)->publishBatch($events);
-        $this->assertSame([100, 100, 5], $this->queen->sizes);
-        $this->assertSame(array_map(fn ($e) => $e->id(), $events), array_column($this->queen->pushes, 'transactionId'));
-        foreach ($events as $i => $event) {
-            $this->assertSame(AuditPublisher::partitionFor($event), $this->queen->pushes[$i]['partition']);
+        $this->assertCount(100, $this->queen->pushes);
+        $this->assertSame(array_fill(0, 100, 1), $this->queen->sizes);
+        $received = [];
+        foreach ($this->queen->pushes as $push) {
+            $this->assertSame('audit_batch', $push['data']->kind);
+            $this->assertSame(1, $push['data']->schema_version);
+            $this->assertCount(100, $push['data']->events);
+            $this->assertLessThanOrEqual(512 * 1024, strlen($push['json']));
+            $received = array_merge($received, $push['data']->events);
         }
+        $this->assertSame(array_map(fn ($e) => $e->id(), $events), array_column($received, 'event_id'));
+        $this->assertSame(1, count(array_unique(array_column($this->queen->pushes, 'partition'))));
+    }
+
+    public function test_retries_keep_message_ids_and_a_partial_chunk_stays_an_envelope(): void
+    {
+        $events = array_map(fn ($i) => AuditEvent::create('test', ['action' => 'exported']), range(1, 201));
+        $publisher = app(AuditPublisher::class);
+        $publisher->publishBatch($events);
+        $before = $this->queen->pushes;
+        $this->assertSame([100, 100, 1], array_map(fn ($p) => count($p['data']->events), $before));
+        $publisher->publishBatch($events);
+        $this->assertEquals($before, array_slice($this->queen->pushes, 3));
     }
 
     public function test_bulk_requests_are_bounded_by_bytes_and_empty_batches_do_nothing(): void
@@ -191,7 +209,11 @@ class AuditPublisherTest extends TestCase
         $publisher->publishBatch([]);
         $this->assertSame(0, $this->queen->calls);
         $publisher->publishBatch([$event, $event, $event]);
-        $this->assertSame([2, 1], $this->queen->sizes);
+        $this->assertSame([1, 1], $this->queen->sizes);
+        $this->assertSame([2, 1], array_map(fn ($p) => count($p['data']->events), $this->queen->pushes));
+        foreach ($this->queen->pushes as $push) {
+            $this->assertLessThanOrEqual(512 * 1024, strlen($push['json']));
+        }
     }
 
     public function test_bulk_after_commit_waits_and_rollback_discards_the_whole_batch(): void
@@ -204,13 +226,14 @@ class AuditPublisherTest extends TestCase
         DB::rollBack();
         $this->assertSame([], $this->queen->pushes);
         DB::transaction(fn () => $publisher->publishBatchAfterCommit($events));
-        $this->assertSame([3], $this->queen->sizes);
+        $this->assertSame([1], $this->queen->sizes);
+        $this->assertCount(3, $this->queen->pushes[0]['data']->events);
     }
 
     public function test_partial_and_incomplete_bulk_responses_are_failures(): void
     {
         $events = [AuditEvent::create('test', ['action' => 'exported']), AuditEvent::create('test', ['action' => 'exported'])];
-        foreach ([[['status' => 'queued']], [['status' => 'queued'], ['status' => 'failed', 'error' => 'refused']]] as $response) {
+        foreach ([[], [['status' => 'failed', 'error' => 'refused']], [['status' => 'queued'], ['status' => 'queued']]] as $response) {
             $this->queen->response = $response;
             try {
                 app(AuditPublisher::class)->publishBatch($events);
@@ -220,7 +243,7 @@ class AuditPublisherTest extends TestCase
                 $this->assertSame($events[0]->id(), $error->eventId);
             }
         }
-        $this->queen->response = [['status' => 'duplicate'], ['status' => 'queued']];
+        $this->queen->response = [['status' => 'duplicate']];
         app(AuditPublisher::class)->publishBatch($events);
     }
 
@@ -251,12 +274,13 @@ class AuditPublisherTest extends TestCase
 
     public function test_events_without_subject_and_long_subjects_get_valid_partitions(): void
     {
-        $this->assertSame('Default', AuditPublisher::partitionFor(AuditEvent::create('test', ['action' => 'exported'])));
+        $this->assertMatchesRegularExpression('/^audit:[0-3][0-9a-f]$/', AuditPublisher::partitionFor(AuditEvent::create('test', ['action' => 'exported'])));
         $long = AuditEvent::create('test', ['action' => 'exported', 'subject' => ['type' => str_repeat('t', 150), 'id' => str_repeat('i', 150)]]);
         $partition = AuditPublisher::partitionFor($long);
-        $this->assertStringStartsWith('sha256:', $partition);
+        $this->assertMatchesRegularExpression('/^audit:[0-3][0-9a-f]$/', $partition);
         $this->assertSame($partition, AuditPublisher::partitionFor($long));
-        $this->assertLessThanOrEqual(200, strlen($partition));
+        $partitions = array_map(fn ($i) => AuditPublisher::partitionFor(AuditEvent::create('test', ['action' => 'exported', 'subject' => ['type' => 'order', 'id' => (string) $i]])), range(1, 10000));
+        $this->assertLessThanOrEqual(64, count(array_unique($partitions)));
     }
 
     public function test_model_changes_are_frozen_and_only_selected_fields_are_audited(): void

@@ -21,6 +21,10 @@ final class AuditPublisher
     /** Queue and partition names share a budget of 411 bytes on the broker. */
     private const MAX_PARTITION_BYTES = 200;
 
+    private const MAX_BATCH_COUNT = 100;
+
+    private const MAX_BATCH_BYTES = 512 * 1024;
+
     private ?object $client = null;
 
     /** Until when pushes fail at once, after a failure (traceflow.audit.queen.cooldown_seconds). */
@@ -41,28 +45,71 @@ final class AuditPublisher
      */
     public function publish(AuditEvent $event): void
     {
-        if (($this->config['enabled'] ?? true) === false) {
+        $this->publishBatch([$event]);
+    }
+
+    /**
+     * Push bounded batches with each event's original partition and transaction ID.
+     * On failure, retry the original events: some earlier batches may already be accepted.
+     *
+     * @param  list<AuditEvent>  $events
+     */
+    public function publishBatch(array $events): void
+    {
+        if (($this->config['enabled'] ?? true) === false || $events === []) {
             return;
         }
+        $items = array_map(static fn (AuditEvent $event): array => [
+            'partition' => self::partitionFor($event),
+            'transactionId' => $event->id(),
+            'data' => $event->jsonSerialize(),
+        ], $events);
+        $batch = [];
+        $bytes = 0;
+        foreach ($items as $item) {
+            $size = strlen(json_encode($item, JSON_THROW_ON_ERROR));
+            if ($batch !== [] && (count($batch) >= self::MAX_BATCH_COUNT || $bytes + $size > self::MAX_BATCH_BYTES)) {
+                $this->push($batch);
+                $batch = [];
+                $bytes = 0;
+            }
+            $batch[] = $item;
+            $bytes += $size;
+        }
+        $this->push($batch);
+    }
+
+    /** @param list<array{partition: string, transactionId: string, data: object}> $items */
+    private function push(array $items): void
+    {
+        $eventId = $items[0]['transactionId'];
         $settings = $this->settings();
         if ($this->unavailableUntil !== null && microtime(true) < $this->unavailableUntil) {
-            throw new AuditDeliveryException('Queen failed a recent audit push; this event was not sent', $event->id(), true);
+            throw new AuditDeliveryException('Queen failed a recent audit push; this event was not sent', $eventId, true);
         }
         try {
             $client = $this->client($settings);
         } catch (Throwable $error) {
-            throw new AuditDeliveryException($error->getMessage(), $event->id(), false);
+            throw new AuditDeliveryException($error->getMessage(), $eventId, false);
         }
         try {
-            $client->queue((string) ($settings['queue'] ?? 'traceflow.audit'))
-                ->partition(self::partitionFor($event))
-                ->push([['transactionId' => $event->id(), 'data' => $event->jsonSerialize()]])
+            $results = $client->queue((string) ($settings['queue'] ?? 'traceflow.audit'))
+                ->partition($items[0]['partition'])
+                ->push($items)
                 ->execute();
+            if (! is_array($results) || count($results) !== count($items)) {
+                throw new RuntimeException('Queen returned an incomplete audit push response');
+            }
+            foreach ($results as $result) {
+                if (! in_array($result['status'] ?? null, ['queued', 'duplicate'], true)) {
+                    throw new RuntimeException($result['error'] ?? 'Queen did not confirm an audit event');
+                }
+            }
         } catch (Throwable $error) {
             $cooldown = max(0, (int) ($settings['cooldown_seconds'] ?? 30));
             $this->unavailableUntil = $cooldown > 0 ? microtime(true) + $cooldown : null;
 
-            throw new AuditDeliveryException('Queen did not accept the audit event: '.$error->getMessage(), $event->id(), true);
+            throw new AuditDeliveryException('Queen did not confirm the audit batch; retry with the original event IDs: '.$error->getMessage(), $eventId, true);
         }
         $this->unavailableUntil = null;
     }
@@ -75,10 +122,19 @@ final class AuditPublisher
      */
     public function publishAfterCommit(AuditEvent $event, ?ConnectionInterface $connection = null): void
     {
+        $this->publishBatchAfterCommit([$event], $connection);
+    }
+
+    /** @param list<AuditEvent> $events */
+    public function publishBatchAfterCommit(array $events, ?ConnectionInterface $connection = null): void
+    {
+        if ($events === []) {
+            return;
+        }
         $connection ??= DB::connection();
-        $deliver = function () use ($event): void {
+        $deliver = function () use ($events): void {
             try {
-                $this->publish($event);
+                $this->publishBatch($events);
             } catch (Throwable $error) {
                 self::report($error);
             }

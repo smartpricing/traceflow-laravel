@@ -21,16 +21,28 @@ final class AuditPublisher
 
     private const MAX_BATCH_BYTES = 512 * 1024;
 
-    private ?object $client = null;
+    /** @var object{client: ?object, unavailableUntil: ?float} Shared by scoped publishers. */
+    private object $delivery;
 
-    /** Until when pushes fail at once, after a failure (traceflow.audit.queen.cooldown_seconds). */
-    private ?float $unavailableUntil = null;
+    private bool $checkHistory = false;
 
     /**
      * @param  array<string, mixed>  $config  the traceflow configuration
      * @param  (Closure(array<string, mixed>): object)|null  $clientFactory  builds the Queen client
      */
-    public function __construct(private readonly array $config, private readonly ?Closure $clientFactory = null) {}
+    public function __construct(private readonly array $config, private readonly ?Closure $clientFactory = null)
+    {
+        $this->delivery = (object) ['client' => null, 'unavailableUntil' => null];
+    }
+
+    /** Check archived event IDs for this publisher's sends without changing the original. */
+    public function checkHistory(bool $enabled = true): self
+    {
+        $publisher = clone $this;
+        $publisher->checkHistory = $enabled;
+
+        return $publisher;
+    }
 
     /**
      * Push the event now. Throws AuditDeliveryException when Queen does not accept it.
@@ -55,10 +67,15 @@ final class AuditPublisher
         if (($this->config['enabled'] ?? true) === false || $events === []) {
             return;
         }
+        $checkHistory = $this->checkHistory;
         $events = array_values($events);
         if (count($events) === 1) {
             $event = $events[0];
-            $this->push([['partition' => self::partitionFor($event), 'transactionId' => $event->id(), 'data' => $event->jsonSerialize()]], $event->id());
+            $data = $event->jsonSerialize();
+            if ($checkHistory) {
+                $data->check_history = true;
+            }
+            $this->push([['partition' => self::partitionFor($event), 'transactionId' => $event->id(), 'data' => $data]], $event->id());
 
             return;
         }
@@ -66,27 +83,30 @@ final class AuditPublisher
         $key = $events[0]->jsonSerialize()->batch_id ?? $events[0]->id();
         $partition = sprintf('audit:%02x', hexdec(substr(hash('sha256', $key), 0, 2)) & 63);
         $batch = [];
-        $overhead = strlen(json_encode(['schema_version' => 1, 'kind' => 'audit_batch', 'events' => []], JSON_THROW_ON_ERROR));
+        $overhead = strlen(json_encode(['schema_version' => 1, 'kind' => 'audit_batch', 'events' => [], ...($checkHistory ? ['check_history' => true] : [])], JSON_THROW_ON_ERROR));
         $bytes = $overhead;
         foreach ($events as $event) {
             $item = $event->jsonSerialize();
             $size = strlen(json_encode($item, JSON_THROW_ON_ERROR)) + 1;
             if ($batch !== [] && (count($batch) >= self::MAX_BATCH_COUNT || $bytes + $size > self::MAX_BATCH_BYTES)) {
-                $this->pushEnvelope($batch, $partition);
+                $this->pushEnvelope($batch, $partition, $checkHistory);
                 $batch = [];
                 $bytes = $overhead;
             }
             $batch[] = $item;
             $bytes += $size;
         }
-        $this->pushEnvelope($batch, $partition);
+        $this->pushEnvelope($batch, $partition, $checkHistory);
     }
 
     /** @param list<object> $events */
-    private function pushEnvelope(array $events, string $partition): void
+    private function pushEnvelope(array $events, string $partition, bool $checkHistory): void
     {
         $data = (object) ['schema_version' => 1, 'kind' => 'audit_batch', 'events' => $events];
         $id = 'audit-batch:'.hash('sha256', json_encode($data, JSON_THROW_ON_ERROR));
+        if ($checkHistory) {
+            $data->check_history = true;
+        }
         $this->push([['partition' => $partition, 'transactionId' => $id, 'data' => $data]], $events[0]->event_id);
     }
 
@@ -94,7 +114,7 @@ final class AuditPublisher
     private function push(array $items, string $eventId): void
     {
         $settings = $this->settings();
-        if ($this->unavailableUntil !== null && microtime(true) < $this->unavailableUntil) {
+        if ($this->delivery->unavailableUntil !== null && microtime(true) < $this->delivery->unavailableUntil) {
             throw new AuditDeliveryException('Queen failed a recent audit push; this event was not sent', $eventId, true);
         }
         try {
@@ -117,11 +137,11 @@ final class AuditPublisher
             }
         } catch (Throwable $error) {
             $cooldown = max(0, (int) ($settings['cooldown_seconds'] ?? 30));
-            $this->unavailableUntil = $cooldown > 0 ? microtime(true) + $cooldown : null;
+            $this->delivery->unavailableUntil = $cooldown > 0 ? microtime(true) + $cooldown : null;
 
             throw new AuditDeliveryException('Queen did not confirm the audit batch; retry with the original event IDs: '.$error->getMessage(), $eventId, true);
         }
-        $this->unavailableUntil = null;
+        $this->delivery->unavailableUntil = null;
     }
 
     /**
@@ -177,11 +197,11 @@ final class AuditPublisher
     /** @param  array<string, mixed>  $settings */
     private function client(array $settings): object
     {
-        if ($this->client !== null) {
-            return $this->client;
+        if ($this->delivery->client !== null) {
+            return $this->delivery->client;
         }
         if ($this->clientFactory !== null) {
-            return $this->client = ($this->clientFactory)($settings);
+            return $this->delivery->client = ($this->clientFactory)($settings);
         }
         if (! class_exists(Queen::class)) {
             throw new RuntimeException('Audit delivery requires the queen-mq/php-client package');
@@ -191,7 +211,7 @@ final class AuditPublisher
             throw new RuntimeException('Audit delivery requires TRACEFLOW_AUDIT_QUEEN_URL or QUEEN_URL');
         }
 
-        return $this->client = new Queen([
+        return $this->delivery->client = new Queen([
             'urls' => $urls,
             'bearerToken' => ($settings['bearer_token'] ?? null) ?: null,
             // A push runs on the request path: fail fast rather than hold the request.

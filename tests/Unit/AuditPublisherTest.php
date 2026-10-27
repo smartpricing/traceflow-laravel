@@ -202,13 +202,75 @@ class AuditPublisherTest extends TestCase
         $this->assertEquals($before, array_slice($this->queen->pushes, 3));
     }
 
+    public function test_history_checks_default_off_and_can_be_overridden_per_send(): void
+    {
+        $events = array_map(fn () => AuditEvent::create('test', ['action' => 'exported']), range(1, 2));
+        $publisher = app(AuditPublisher::class);
+        $publisher->publish($events[0]);
+        $publisher->publishBatch($events);
+        foreach ($this->queen->pushes as $push) {
+            $this->assertFalse(property_exists($push['data'], 'check_history'));
+        }
+
+        $checked = $publisher->checkHistory();
+        $checked->publish($events[0]);
+        $checked->publishBatch($events);
+        $this->assertTrue($this->queen->pushes[2]['data']->check_history);
+        $this->assertTrue($this->queen->pushes[3]['data']->check_history);
+        $this->assertSame($this->queen->pushes[0]['transactionId'], $this->queen->pushes[2]['transactionId']);
+        $this->assertSame($this->queen->pushes[1]['transactionId'], $this->queen->pushes[3]['transactionId']);
+        $this->assertFalse(property_exists($events[0]->jsonSerialize(), 'check_history'));
+
+        $publisher->publish($events[0]);
+        $checked->checkHistory(false)->publishBatch($events);
+        $checked->publish($events[1]);
+        $this->assertFalse(property_exists($this->queen->pushes[4]['data'], 'check_history'));
+        $this->assertFalse(property_exists($this->queen->pushes[5]['data'], 'check_history'));
+        $this->assertTrue($this->queen->pushes[6]['data']->check_history);
+    }
+
+    public function test_history_check_override_survives_after_commit_delivery(): void
+    {
+        $events = array_map(fn () => AuditEvent::create('test', ['action' => 'exported']), range(1, 2));
+        DB::transaction(function () use ($events) {
+            $publisher = app(AuditPublisher::class);
+            $publisher->checkHistory()->publishBatchAfterCommit($events);
+            $publisher->publishAfterCommit($events[0]);
+            $publisher->checkHistory()->publishAfterCommit($events[1]);
+            $this->assertSame([], $this->queen->pushes);
+        });
+        $this->assertTrue($this->queen->pushes[0]['data']->check_history);
+        $this->assertFalse(property_exists($this->queen->pushes[1]['data'], 'check_history'));
+        $this->assertTrue($this->queen->pushes[2]['data']->check_history);
+    }
+
+    public function test_scoped_publishers_share_the_connection_and_failure_cooldown(): void
+    {
+        $connections = 0;
+        $publisher = new AuditPublisher(config('traceflow'), function () use (&$connections) {
+            $connections++;
+
+            return $this->queen;
+        });
+        $event = AuditEvent::create('test', ['action' => 'exported']);
+        $publisher->checkHistory()->publish($event);
+        $publisher->publish($event);
+        $this->queen->failure = new \RuntimeException('Operation timed out');
+        $this->expectDeliveryFailure($publisher->checkHistory(), $event, 'timed out');
+        $this->queen->failure = null;
+        $this->expectDeliveryFailure($publisher, $event, 'recent audit push');
+        $this->expectDeliveryFailure($publisher->checkHistory(), $event, 'recent audit push');
+        $this->assertSame(1, $connections);
+        $this->assertSame(3, $this->queen->calls);
+    }
+
     public function test_bulk_requests_are_bounded_by_bytes_and_empty_batches_do_nothing(): void
     {
         $event = AuditEvent::create('test', ['action' => 'exported', 'metadata' => ['value' => str_repeat('x', 180000)]]);
         $publisher = app(AuditPublisher::class);
         $publisher->publishBatch([]);
         $this->assertSame(0, $this->queen->calls);
-        $publisher->publishBatch([$event, $event, $event]);
+        $publisher->checkHistory()->publishBatch([$event, $event, $event]);
         $this->assertSame([1, 1], $this->queen->sizes);
         $this->assertSame([2, 1], array_map(fn ($p) => count($p['data']->events), $this->queen->pushes));
         foreach ($this->queen->pushes as $push) {

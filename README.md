@@ -172,6 +172,25 @@ and 512 KiB of JSON**, preserving each event's ID and snapshot. For example,
 10,000 small events produce 100 messages, not 10,000. A single-event call keeps
 the original `audit` payload format.
 
+Archived-ID checks are off by default. Enable them for a specific send:
+
+```php
+$publisher = app(AuditPublisher::class);
+$publisher->checkHistory()->publish($event);
+$publisher->checkHistory()->publishBatch($events);
+$publisher->checkHistory()->publishBatchAfterCommit($events, $db);
+```
+
+`checkHistory()` returns a scoped publisher; later sends through `$publisher` keep
+checks off. It also supports `publishAfterCommit()`. There is no environment setting.
+The option belongs to the delivery, not to `AuditEvent`, and preserves event IDs.
+Choose it on the first attempt: changing it does not reprocess a message that Queen
+already accepted within its deduplication window. Pending retries still deduplicate without it. After archival, a retry
+can append a physical copy; timeline reads merge identical IDs. Never reuse an ID for
+different content. With checks enabled, the consumer verifies retained IDs and sends
+conflicts to the dead-letter queue. Queue acceptance does not confirm that check.
+Deploy the backend with `check_history` support before enabling the option.
+
 The publisher uses **64 fixed transport partitions**. All chunks of one bulk call
 use the same partition (derived from `batch_id`, or its first event ID); single
 calls hash their source and subject. This preserves order within a bulk call, but
@@ -181,12 +200,12 @@ orders entity history by the event timestamp and ID, independently of partitions
 **Deploy the Traceflow consumer with `audit_batch` support before upgrading to
 SDK 2.11.** It accepts both payload formats, validates the entire envelope before
 writing, and acknowledges it only after every event is durable. A storage failure
-retries the envelope; events already saved are deduplicated. Invalid envelopes or
+retries the envelope; pending events are deduplicated. Invalid envelopes or
 permanent event conflicts go to the dead-letter queue for inspection.
 
 The after-commit variant registers one callback and publishes nothing on rollback.
 If delivery fails, retry with the **same original events**: earlier chunks may
-already be accepted, and stable envelope and event IDs make retries idempotent.
+already be accepted, and stable envelope IDs deduplicate within Queen’s transaction-ID window.
 After-commit failures are reported and are not durably retried. Internal archival
 still uses individual events; envelope batching reduces messages on the ingress queue.
 

@@ -11,6 +11,12 @@ use Smartness\TraceFlow\Enums\TraceStatus;
 
 abstract class AbstractHttpTransport implements TransportInterface
 {
+    /** Drop warnings are logged at most once per this many seconds per process. */
+    protected const DROP_WARNING_INTERVAL = 10.0;
+
+    /** Upper bound of one retry delay, in milliseconds. */
+    protected const MAX_RETRY_DELAY_MS = 30000;
+
     protected Client $client;
 
     protected string $endpoint;
@@ -21,28 +27,55 @@ abstract class AbstractHttpTransport implements TransportInterface
 
     protected int $retryDelay;
 
-    // Circuit breaker state
-    private int $failureCount = 0;
+    /** Total timeout of one HTTP attempt (connect + response), in seconds. */
+    protected float $timeout;
 
-    private bool $circuitOpen = false;
+    protected CircuitBreaker $breaker;
 
-    private int $circuitOpenUntil = 0;
+    /**
+     * Cumulative delivery counters for this transport.
+     *
+     * @var array<string, int>
+     */
+    protected array $stats = [
+        'delivered' => 0,
+        'failed' => 0,
+        'rejected' => 0,
+        'dropped_queue_full' => 0,
+        'dropped_breaker_open' => 0,
+        'dropped_flush_timeout' => 0,
+    ];
 
-    private int $circuitBreakerThreshold;
+    /** @var array<string, int> undelivered events per reason since the last failure report */
+    private array $undeliveredSinceReport = [];
 
-    private int $circuitBreakerTimeoutMs;
+    private ?string $lastError = null;
 
-    /** @var TraceEvent[] */
-    protected array $eventQueue = [];
+    /** @var array<string, int> */
+    private array $dropsSinceWarning = [];
+
+    private float $lastDropWarningAt = 0.0;
+
+    private float $createdAt;
 
     public function __construct(array $config)
     {
+        $this->createdAt = microtime(true);
         $this->endpoint = $config['endpoint'];
-        $this->silentErrors = $config['silent_errors'] ?? true;
-        $this->maxRetries = $config['max_retries'] ?? 3;
-        $this->retryDelay = $config['retry_delay'] ?? 1000;
-        $this->circuitBreakerThreshold = $config['circuit_breaker_threshold'] ?? 5;
-        $this->circuitBreakerTimeoutMs = $config['circuit_breaker_timeout_ms'] ?? 60000;
+        $this->silentErrors = (bool) ($config['silent_errors'] ?? true);
+        $this->maxRetries = max(0, (int) ($config['max_retries'] ?? 3));
+        $this->retryDelay = max(0, (int) ($config['retry_delay'] ?? 1000));
+        $this->timeout = (float) ($config['timeout'] ?? 5.0);
+
+        $store = $config['circuit_breaker_store'] ?? null;
+        $this->breaker = new CircuitBreaker(
+            store: $store instanceof CircuitBreakerStore ? $store : new InMemoryCircuitBreakerStore,
+            threshold: (int) ($config['circuit_breaker_threshold'] ?? 5),
+            timeoutSeconds: ((int) ($config['circuit_breaker_timeout_ms'] ?? 60000)) / 1000,
+            // A probe lasts at most one attempt (sync) or one flush (async).
+            probeTtlSeconds: max($this->timeout, (float) ($config['flush_timeout'] ?? 0)) + 1.0,
+            logPrefix: $this->logPrefix(),
+        );
 
         $headers = ['Content-Type' => 'application/json'];
 
@@ -53,7 +86,7 @@ abstract class AbstractHttpTransport implements TransportInterface
         $this->client = $this->buildClient([
             'base_uri' => $this->endpoint,
             'headers' => $headers,
-            'timeout' => $config['timeout'] ?? 5.0,
+            'timeout' => $this->timeout,
         ]);
     }
 
@@ -62,81 +95,68 @@ abstract class AbstractHttpTransport implements TransportInterface
         return new Client($options);
     }
 
-    public function send(TraceEvent $event): void
+    public function circuitBreaker(): CircuitBreaker
     {
-        if ($this->isCircuitOpen()) {
-            $this->eventQueue[] = $event;
-            error_log($this->logPrefix()." Circuit open, queued event: {$event->eventType->value} (".count($this->eventQueue)." pending)");
-
-            return;
-        }
-
-        try {
-            match ($event->eventType) {
-                TraceEventType::TRACE_STARTED => $this->createTrace($event),
-                TraceEventType::TRACE_FINISHED,
-                TraceEventType::TRACE_FAILED,
-                TraceEventType::TRACE_CANCELLED => $this->updateTrace($event),
-                TraceEventType::STEP_STARTED => $this->createStep($event),
-                TraceEventType::STEP_FINISHED,
-                TraceEventType::STEP_FAILED => $this->updateStep($event),
-                TraceEventType::LOG_EMITTED => $this->createLog($event),
-                default => null,
-            };
-            // Reset on success
-            $this->failureCount = 0;
-        } catch (\Exception $e) {
-            if ($this->silentErrors) {
-                error_log($this->logPrefix()." Error sending event (silenced): {$e->getMessage()}");
-            } else {
-                throw $e;
-            }
-        }
+        return $this->breaker;
     }
 
-    protected function recordFailure(): void
+    /**
+     * Delivery counters since this transport was created.
+     *
+     * @return array<string, int|string>
+     */
+    public function getStats(): array
     {
-        if ($this->circuitOpen) {
-            return;
-        }
-
-        $this->failureCount++;
-        if ($this->failureCount >= $this->circuitBreakerThreshold) {
-            $this->circuitOpen = true;
-            $this->circuitOpenUntil = (int) (microtime(true) * 1000) + $this->circuitBreakerTimeoutMs;
-            error_log($this->logPrefix()." Circuit breaker opened for {$this->circuitBreakerTimeoutMs}ms");
-        }
+        return $this->stats + ['circuit' => $this->breaker->knownState()];
     }
 
-    private function isCircuitOpen(): bool
+    /**
+     * Map a trace event to its HTTP request. The payload is sanitized now, so
+     * later changes to objects the caller passed do not affect what is sent.
+     *
+     * @return array{method: string, uri: string, payload: array, trace: string, step: ?string, barrier: bool}|null
+     */
+    protected function buildRequest(TraceEvent $event): ?array
     {
-        if ($this->circuitOpen && (int) (microtime(true) * 1000) > $this->circuitOpenUntil) {
-            $this->circuitOpen = false;
-            $this->failureCount = 0;
-            error_log($this->logPrefix().' Circuit breaker closed, resuming requests');
-            $this->drainQueue();
+        $request = match ($event->eventType) {
+            TraceEventType::TRACE_STARTED => ['POST', '/api/v1/traces', $this->createTracePayload($event)],
+            TraceEventType::TRACE_FINISHED,
+            TraceEventType::TRACE_FAILED,
+            TraceEventType::TRACE_CANCELLED => ['PATCH', "/api/v1/traces/{$event->traceId}", $this->updateTracePayload($event)],
+            TraceEventType::STEP_STARTED => ['POST', '/api/v1/steps', $this->createStepPayload($event)],
+            TraceEventType::STEP_FINISHED,
+            TraceEventType::STEP_FAILED => ['PATCH', "/api/v1/steps/{$event->traceId}/{$event->stepId}", $this->updateStepPayload($event)],
+            TraceEventType::LOG_EMITTED => ['POST', '/api/v1/logs', $this->createLogPayload($event)],
+            default => null,
+        };
+
+        if ($request === null) {
+            return null;
         }
 
-        return $this->circuitOpen;
+        $isStepEvent = in_array($event->eventType, [
+            TraceEventType::STEP_STARTED, TraceEventType::STEP_FINISHED, TraceEventType::STEP_FAILED,
+        ], true);
+
+        return [
+            'method' => $request[0],
+            'uri' => $request[1],
+            'payload' => $this->sanitizePayload($request[2]),
+            'trace' => $event->traceId,
+            // Requests of the same step must be delivered in order (create, then update).
+            'step' => $isStepEvent ? (string) $event->stepId : null,
+            // A trace's create and its terminal update wait for everything sent
+            // before them for that trace, and hold back everything sent after.
+            'barrier' => in_array($event->eventType, [
+                TraceEventType::TRACE_STARTED, TraceEventType::TRACE_FINISHED,
+                TraceEventType::TRACE_FAILED, TraceEventType::TRACE_CANCELLED,
+            ], true),
+        ];
     }
 
-    protected function drainQueue(): void
+    private function createTracePayload(TraceEvent $event): array
     {
-        if (empty($this->eventQueue)) {
-            return;
-        }
-
-        $queued = $this->eventQueue;
-        $this->eventQueue = [];
-
-        foreach ($queued as $event) {
-            $this->send($event);
-        }
-    }
-
-    private function createTrace(TraceEvent $event): void
-    {
-        $payload = array_filter([
+        return array_filter([
             'trace_id' => $event->traceId,
             'trace_type' => $event->payload['trace_type'] ?? null,
             'status' => TraceStatus::PENDING->value,
@@ -154,11 +174,9 @@ abstract class AbstractHttpTransport implements TransportInterface
             'trace_timeout_ms' => $event->payload['trace_timeout_ms'] ?? null,
             'step_timeout_ms' => $event->payload['step_timeout_ms'] ?? null,
         ], fn ($value) => $value !== null);
-
-        $this->dispatchSafe('POST', '/api/v1/traces', $payload, "trace:{$event->traceId}");
     }
 
-    private function updateTrace(TraceEvent $event): void
+    private function updateTracePayload(TraceEvent $event): array
     {
         $status = match ($event->eventType) {
             TraceEventType::TRACE_FINISHED => TraceStatus::SUCCESS,
@@ -167,7 +185,7 @@ abstract class AbstractHttpTransport implements TransportInterface
             default => throw new \UnexpectedValueException("Unexpected event type for updateTrace: {$event->eventType->value}"),
         };
 
-        $payload = array_filter([
+        return array_filter([
             'status' => $status->value,
             'updated_at' => $event->timestamp,
             'finished_at' => $event->timestamp,
@@ -177,13 +195,11 @@ abstract class AbstractHttpTransport implements TransportInterface
             'stack' => $event->payload['stack'] ?? null,
             'metadata' => $event->payload['metadata'] ?? null,
         ], fn ($value) => $value !== null);
-
-        $this->dispatchSafe('PATCH', "/api/v1/traces/{$event->traceId}", $payload, "trace:{$event->traceId}");
     }
 
-    private function createStep(TraceEvent $event): void
+    private function createStepPayload(TraceEvent $event): array
     {
-        $payload = array_filter([
+        return array_filter([
             'trace_id' => $event->traceId,
             'step_id' => $event->stepId,
             'step_type' => $event->payload['step_type'] ?? null,
@@ -194,17 +210,15 @@ abstract class AbstractHttpTransport implements TransportInterface
             'input' => $event->payload['input'] ?? null,
             'metadata' => $event->payload['metadata'] ?? null,
         ], fn ($value) => $value !== null);
-
-        $this->dispatchSafe('POST', '/api/v1/steps', $payload, "step:{$event->traceId}:{$event->stepId}");
     }
 
-    private function updateStep(TraceEvent $event): void
+    private function updateStepPayload(TraceEvent $event): array
     {
         $status = $event->eventType === TraceEventType::STEP_FINISHED
             ? StepStatus::COMPLETED
             : StepStatus::FAILED;
 
-        $payload = array_filter([
+        return array_filter([
             'status' => $status->value,
             'updated_at' => $event->timestamp,
             'finished_at' => $event->timestamp,
@@ -212,13 +226,11 @@ abstract class AbstractHttpTransport implements TransportInterface
             'error' => $event->payload['error'] ?? null,
             'metadata' => $event->payload['metadata'] ?? null,
         ], fn ($value) => $value !== null);
-
-        $this->dispatchSafe('PATCH', "/api/v1/steps/{$event->traceId}/{$event->stepId}", $payload, "step:{$event->traceId}:{$event->stepId}");
     }
 
-    private function createLog(TraceEvent $event): void
+    private function createLogPayload(TraceEvent $event): array
     {
-        $payload = array_filter([
+        return array_filter([
             'trace_id' => $event->traceId,
             'log_time' => $event->timestamp,
             'log_id' => $event->eventId,
@@ -228,21 +240,6 @@ abstract class AbstractHttpTransport implements TransportInterface
             'source' => $event->source,
             'event_type' => $event->payload['event_type'] ?? null,
         ], fn ($value) => $value !== null);
-
-        $this->dispatchSafe('POST', '/api/v1/logs', $payload);
-    }
-
-    /**
-     * Sanitize the payload and delegate to dispatch.
-     *
-     * $orderKey identifies the entity a request belongs to (e.g. a single step or
-     * trace). Transports that dispatch concurrently use it to serialize requests
-     * for the same entity so an update can never overtake its create. Independent
-     * entities (and logs, which pass null) still run concurrently.
-     */
-    private function dispatchSafe(string $method, string $uri, array $payload, ?string $orderKey = null): void
-    {
-        $this->dispatch($method, $uri, $this->sanitizePayload($payload), $orderKey);
     }
 
     /**
@@ -323,15 +320,15 @@ abstract class AbstractHttpTransport implements TransportInterface
     }
 
     /**
-     * Only network/transport errors and 5xx responses are worth retrying. 4xx
-     * client errors are deterministic — retrying a 404/409/422 just wastes
-     * attempts and spams logs, so they are not retried (matches the JS SDK).
+     * Network/transport errors, timeouts, 5xx and 429 are worth retrying and
+     * count toward the circuit breaker. Other 4xx client errors are
+     * deterministic: retrying a 404/422 just wastes attempts.
      */
     protected function isRetryable(\Throwable $e): bool
     {
         $status = $this->statusCode($e);
 
-        return $status === null || $status >= 500;
+        return $status === null || $status >= 500 || $status === 429;
     }
 
     /**
@@ -344,7 +341,117 @@ abstract class AbstractHttpTransport implements TransportInterface
         return $this->statusCode($e) === 409;
     }
 
-    abstract protected function dispatch(string $method, string $uri, array $payload, ?string $orderKey = null): void;
+    /**
+     * Delay before retry number $attempt (1-based): exponential backoff from
+     * retry_delay, capped at 30 s, with jitter (between half and all of it).
+     */
+    protected function retryDelaySeconds(int $attempt): float
+    {
+        $base = min(self::MAX_RETRY_DELAY_MS, $this->retryDelay * (2 ** max(0, $attempt - 1)));
+        $half = intdiv((int) $base, 2);
+
+        return ($half + mt_rand(0, max(0, (int) $base - $half))) / 1000;
+    }
+
+    protected function noteDelivered(): void
+    {
+        $this->stats['delivered']++;
+    }
+
+    /**
+     * Remember the error of a failed attempt, for the next warning or report.
+     */
+    protected function noteAttemptError(?string $error): void
+    {
+        if ($error !== null) {
+            $this->lastError = $error;
+        }
+    }
+
+    /**
+     * Count events that will not be delivered. $reason is one of failed,
+     * rejected, dropped_queue_full, dropped_breaker_open, dropped_flush_timeout.
+     */
+    protected function noteUndelivered(string $reason, int $count = 1, ?string $error = null): void
+    {
+        if ($count <= 0) {
+            return;
+        }
+
+        $this->stats[$reason] = ($this->stats[$reason] ?? 0) + $count;
+        $this->undeliveredSinceReport[$reason] = ($this->undeliveredSinceReport[$reason] ?? 0) + $count;
+        $this->dropsSinceWarning[$reason] = ($this->dropsSinceWarning[$reason] ?? 0) + $count;
+
+        if ($error !== null) {
+            $this->lastError = $error;
+        }
+    }
+
+    /**
+     * Log undelivered events at most once per DROP_WARNING_INTERVAL, with the
+     * counts since the previous warning.
+     *
+     * Events dropped because the breaker is open are left out of the warning
+     * in processes younger than the interval: under PHP-FPM every request
+     * starts a fresh transport, so they would otherwise be logged once per
+     * request for the whole outage. The breaker logs when it opens and
+     * re-opens instead, and long-lived processes (queue workers, Octane)
+     * still report them every interval.
+     */
+    protected function warnUndelivered(): void
+    {
+        if ($this->dropsSinceWarning === []) {
+            return;
+        }
+
+        $now = microtime(true);
+
+        if ($now - $this->lastDropWarningAt < self::DROP_WARNING_INTERVAL) {
+            return;
+        }
+
+        $report = $this->dropsSinceWarning;
+
+        if ($now - $this->createdAt < self::DROP_WARNING_INTERVAL) {
+            unset($report['dropped_breaker_open']);
+        }
+
+        if ($report === []) {
+            return;
+        }
+
+        $parts = [];
+        foreach ($report as $reason => $count) {
+            $parts[] = "{$reason}={$count}";
+            unset($this->dropsSinceWarning[$reason]);
+        }
+
+        $message = $this->logPrefix().' '.array_sum($report).' trace event(s) not delivered since the last warning ('.implode(', ', $parts).')';
+
+        if ($this->lastError !== null) {
+            $message .= "; last error: {$this->lastError}";
+        }
+
+        error_log($message);
+        $this->lastDropWarningAt = $now;
+    }
+
+    /**
+     * With silent_errors=false, throw if events went undelivered since the
+     * previous report. Called by flush() and shutdown().
+     */
+    protected function reportUndelivered(): void
+    {
+        if ($this->silentErrors || $this->undeliveredSinceReport === []) {
+            return;
+        }
+
+        $undelivered = $this->undeliveredSinceReport;
+        $lastError = $this->lastError;
+        $this->undeliveredSinceReport = [];
+
+        throw new DeliveryException($undelivered, $lastError);
+    }
 
     abstract protected function logPrefix(): string;
 }

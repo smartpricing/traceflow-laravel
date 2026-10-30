@@ -8,6 +8,7 @@ use Smartness\TraceFlow\Handles\TraceHandle;
 
 /**
  * @method static TraceHandle startTrace(?string $traceId = null, ?string $traceType = null, ?string $title = null, ?string $description = null, ?string $owner = null, ?array $tags = null, ?array $metadata = null, mixed $params = null, ?int $traceTimeoutMs = null, ?int $stepTimeoutMs = null)
+ * @method static TraceHandle continueTrace(string $traceId)
  * @method static TraceHandle getTrace(string $traceId)
  * @method static TraceHandle|null getCurrentTrace()
  * @method static mixed runWithTrace(callable $callback, array $traceOptions = [])
@@ -16,6 +17,7 @@ use Smartness\TraceFlow\Handles\TraceHandle;
  * @method static void log(string $message, string $level = 'INFO', ?string $eventType = null, mixed $details = null)
  * @method static void setCurrentTraceId(string $traceId)
  * @method static void flush()
+ * @method static array getStats()
  * @method static void shutdown()
  *
  * @see \Smartness\TraceFlow\TraceFlowSDK

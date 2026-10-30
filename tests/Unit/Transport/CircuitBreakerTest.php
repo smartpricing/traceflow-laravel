@@ -9,87 +9,251 @@ use GuzzleHttp\HandlerStack;
 use GuzzleHttp\Middleware;
 use GuzzleHttp\Psr7\Request;
 use GuzzleHttp\Psr7\Response;
+use Illuminate\Cache\ArrayStore;
+use Illuminate\Cache\Repository;
+use Illuminate\Contracts\Cache\Repository as RepositoryContract;
 use PHPUnit\Framework\TestCase;
-use ReflectionClass;
 use Smartness\TraceFlow\DTO\TraceEvent;
 use Smartness\TraceFlow\Enums\TraceEventType;
 use Smartness\TraceFlow\Transport\AbstractHttpTransport;
+use Smartness\TraceFlow\Transport\CacheCircuitBreakerStore;
+use Smartness\TraceFlow\Transport\CircuitBreaker;
+use Smartness\TraceFlow\Transport\CircuitBreakerStore;
 use Smartness\TraceFlow\Transport\HttpTransport;
+use Smartness\TraceFlow\Transport\InMemoryCircuitBreakerStore;
 
 /**
- * Tests for the circuit-breaker logic embedded in AbstractHttpTransport.
- *
- * Design choices that keep these tests deterministic and fast:
- *   - max_retries=0  → each failing send() consumes exactly ONE mock response
- *                      and records exactly ONE failure, so threshold arithmetic
- *                      is straightforward.
- *   - circuit_breaker_threshold=1 or 2  → short mock-response arrays.
- *   - retry_delay=0  → no real sleeping.
- *   - silent_errors=true  → exceptions from send() are swallowed, so the
- *                           circuit-breaker failure counter advances normally
- *                           without tests having to catch.
- *
- * Private circuit-breaker state lives in AbstractHttpTransport, so reflection
- * must target that class — not HttpTransport.
+ * Circuit breaker: closed → open after N consecutive failed attempts → half-open
+ * after the timeout, where a single probe closes it (success) or re-opens it
+ * for the full timeout (failure). State lives in a store shared by every
+ * request/process, so failures add up under PHP-FPM.
  */
 class CircuitBreakerTest extends TestCase
 {
-    private const ENDPOINT  = 'http://localhost:3009';
-    private const TIMESTAMP = '2026-03-24T12:00:00.000Z';
-
-    /** Reflects the parent class where the private CB properties are declared. */
-    private ReflectionClass $parentRef;
-
-    protected function setUp(): void
+    /**
+     * A breaker that re-reads the store on every call, like a fresh request would.
+     */
+    private function breaker(CircuitBreakerStore $store, int $threshold = 3, float $timeout = 60.0): CircuitBreaker
     {
-        $this->parentRef = new ReflectionClass(AbstractHttpTransport::class);
+        return new CircuitBreaker($store, $threshold, $timeout, probeTtlSeconds: 5.0, logPrefix: '[test]', maxSnapshotAge: 0.0);
+    }
+
+    private function openAndExpire(CircuitBreaker $breaker, int $threshold = 1): void
+    {
+        for ($i = 0; $i < $threshold; $i++) {
+            $breaker->recordFailure();
+        }
+        $this->assertSame(CircuitBreaker::OPEN, $breaker->state());
+        usleep(80_000);
     }
 
     // -------------------------------------------------------------------------
-    // Helpers
+    // State machine
+    // -------------------------------------------------------------------------
+
+    public function test_stays_closed_below_threshold(): void
+    {
+        $breaker = $this->breaker(new InMemoryCircuitBreakerStore, threshold: 3);
+
+        $breaker->recordFailure();
+        $breaker->recordFailure();
+
+        $this->assertSame(CircuitBreaker::CLOSED, $breaker->state());
+        $this->assertTrue($breaker->allowRequest());
+    }
+
+    public function test_opens_after_threshold_consecutive_failed_attempts(): void
+    {
+        $breaker = $this->breaker(new InMemoryCircuitBreakerStore, threshold: 3);
+
+        $breaker->recordFailure();
+        $breaker->recordFailure();
+        $breaker->recordFailure();
+
+        $this->assertSame(CircuitBreaker::OPEN, $breaker->state());
+        $this->assertFalse($breaker->allowRequest());
+    }
+
+    public function test_success_resets_consecutive_failures(): void
+    {
+        $store = new InMemoryCircuitBreakerStore;
+        $breaker = $this->breaker($store, threshold: 3);
+
+        $breaker->recordFailure();
+        $breaker->recordFailure();
+        $breaker->refresh(force: true);
+        $breaker->recordSuccess();
+        $breaker->recordFailure();
+        $breaker->recordFailure();
+
+        $this->assertSame(CircuitBreaker::CLOSED, $breaker->state());
+        $this->assertSame(2, $store->read()['failures']);
+    }
+
+    public function test_rejections_do_not_count(): void
+    {
+        $store = new InMemoryCircuitBreakerStore;
+        $breaker = $this->breaker($store, threshold: 1);
+
+        $breaker->recordRejection();
+        $breaker->recordRejection();
+
+        $this->assertSame(CircuitBreaker::CLOSED, $breaker->state());
+        $this->assertSame(0, $store->read()['failures']);
+    }
+
+    public function test_half_open_allows_exactly_one_probe_across_processes(): void
+    {
+        $store = new InMemoryCircuitBreakerStore;
+        $first = $this->breaker($store, threshold: 1, timeout: 0.05);
+        $second = $this->breaker($store, threshold: 1, timeout: 0.05);
+
+        $this->openAndExpire($first);
+
+        $this->assertSame(CircuitBreaker::HALF_OPEN, $first->state());
+        $this->assertTrue($first->allowRequest(), 'the first request after the timeout is the probe');
+        $this->assertFalse($first->allowRequest(), 'no second request while the probe is in flight');
+        $this->assertFalse($second->allowRequest(), 'another process does not probe at the same time');
+    }
+
+    public function test_probe_success_closes_the_breaker_for_everyone(): void
+    {
+        $store = new InMemoryCircuitBreakerStore;
+        $first = $this->breaker($store, threshold: 1, timeout: 0.05);
+        $second = $this->breaker($store, threshold: 1, timeout: 0.05);
+
+        $this->openAndExpire($first);
+        $this->assertTrue($first->allowRequest());
+        $first->recordSuccess();
+
+        $this->assertSame(CircuitBreaker::CLOSED, $first->state());
+        $this->assertSame(CircuitBreaker::CLOSED, $second->state());
+        $this->assertTrue($second->allowRequest());
+        $this->assertSame(['failures' => 0, 'open_until' => null], $store->read());
+    }
+
+    public function test_probe_failure_reopens_for_the_full_timeout_at_once(): void
+    {
+        $store = new InMemoryCircuitBreakerStore;
+        $breaker = $this->breaker($store, threshold: 5, timeout: 0.05);
+
+        $this->openAndExpire($breaker, threshold: 5);
+        $this->assertTrue($breaker->allowRequest());
+
+        $before = microtime(true);
+        $breaker->recordFailure(); // one failure is enough, not five more
+
+        $this->assertSame(CircuitBreaker::OPEN, $breaker->state());
+        $this->assertGreaterThanOrEqual($before + 0.05, $store->read()['open_until']);
+        $this->assertFalse($breaker->allowRequest());
+    }
+
+    public function test_failures_from_different_requests_add_up(): void
+    {
+        $store = new InMemoryCircuitBreakerStore;
+
+        // Three "requests", each with its own breaker object (as under PHP-FPM).
+        foreach (range(1, 3) as $_) {
+            $this->breaker($store, threshold: 3)->recordFailure();
+        }
+
+        $this->assertSame(CircuitBreaker::OPEN, $this->breaker($store, threshold: 3)->state());
+    }
+
+    // -------------------------------------------------------------------------
+    // Cache-backed store
+    // -------------------------------------------------------------------------
+
+    public function test_cache_store_shares_state_between_instances(): void
+    {
+        $cache = new Repository(new ArrayStore);
+        $a = new CacheCircuitBreakerStore($cache, 'tf:test');
+        $b = new CacheCircuitBreakerStore(fn () => $cache, 'tf:test');
+        $other = new CacheCircuitBreakerStore($cache, 'tf:other-endpoint');
+
+        $this->breaker($a, threshold: 2)->recordFailure();
+        $this->breaker($b, threshold: 2)->recordFailure();
+
+        $this->assertSame(CircuitBreaker::OPEN, $this->breaker($a, threshold: 2)->state());
+        $this->assertSame(CircuitBreaker::OPEN, $this->breaker($b, threshold: 2)->state());
+        $this->assertSame(CircuitBreaker::CLOSED, $this->breaker($other, threshold: 2)->state());
+    }
+
+    public function test_cache_store_probe_lease_is_exclusive(): void
+    {
+        $cache = new Repository(new ArrayStore);
+        $a = new CacheCircuitBreakerStore($cache, 'tf:test');
+        $b = new CacheCircuitBreakerStore($cache, 'tf:test');
+
+        $this->assertTrue($a->acquireProbe(5));
+        $this->assertFalse($b->acquireProbe(5));
+
+        $a->close();
+        $this->assertTrue($b->acquireProbe(5));
+    }
+
+    public function test_cache_errors_fall_back_to_memory_and_never_throw(): void
+    {
+        $cache = $this->createStub(RepositoryContract::class);
+        foreach (['getMultiple', 'increment', 'add', 'put', 'forget', 'get'] as $method) {
+            $cache->method($method)->willThrowException(new \RuntimeException('redis down'));
+        }
+
+        $store = new CacheCircuitBreakerStore($cache, 'tf:test');
+        $breaker = $this->breaker($store, threshold: 2);
+
+        $breaker->recordFailure();
+        $breaker->recordFailure();
+
+        $this->assertSame(CircuitBreaker::OPEN, $breaker->state());
+    }
+
+    public function test_unresolvable_cache_store_falls_back_to_memory(): void
+    {
+        $store = new CacheCircuitBreakerStore(fn () => throw new \InvalidArgumentException('Cache store [nope] is not defined.'));
+        $breaker = $this->breaker($store, threshold: 1);
+
+        $this->assertTrue($breaker->allowRequest());
+        $breaker->recordFailure();
+        $this->assertSame(CircuitBreaker::OPEN, $breaker->state());
+    }
+
+    // -------------------------------------------------------------------------
+    // Synchronous transport honours the breaker
     // -------------------------------------------------------------------------
 
     /**
      * @param  array<Response|RequestException>  $responses
-     * @return array{0: HttpTransport, 1: \stdClass}  [$transport, $history]
+     * @return array{0: HttpTransport, 1: \ArrayObject}
      */
-    private function makeTransport(array $responses, array $config = []): array
+    private function syncTransport(array $responses, array $config = []): array
     {
-        $history = new \stdClass();
-        $history->log = [];
+        $history = new \ArrayObject;
+        $stack = HandlerStack::create(new MockHandler($responses));
+        $stack->push(Middleware::history($history));
 
-        $mock = new MockHandler($responses);
-        $handlerStack = HandlerStack::create($mock);
-        $handlerStack->push(Middleware::history($history->log));
-
-        $defaults = [
-            'endpoint'                   => self::ENDPOINT,
-            'timeout'                    => 5.0,
-            'max_retries'                => 0,
-            'retry_delay'                => 0,
-            'silent_errors'              => true,
-            'circuit_breaker_threshold'  => 2,
+        $transport = new HttpTransport(array_merge([
+            'endpoint' => 'http://localhost:3009',
+            'max_retries' => 0,
+            'retry_delay' => 0,
+            'silent_errors' => true,
+            'circuit_breaker_threshold' => 1,
             'circuit_breaker_timeout_ms' => 60000,
-        ];
+        ], $config));
 
-        $transport = new HttpTransport(array_merge($defaults, $config));
-
-        // Inject the mock-backed client via reflection on the parent class.
-        $this->parentRef->getProperty('client')->setValue($transport, new Client([
-            'handler'  => $handlerStack,
-            'base_uri' => self::ENDPOINT,
-        ]));
+        (new \ReflectionClass(AbstractHttpTransport::class))->getProperty('client')
+            ->setValue($transport, new Client(['handler' => $stack, 'base_uri' => 'http://localhost:3009']));
 
         return [$transport, $history];
     }
 
-    private function makeEvent(string $traceId = 'trace-1', string $eventId = 'e1'): TraceEvent
+    private function event(string $traceId): TraceEvent
     {
         return new TraceEvent(
-            eventId: $eventId,
+            eventId: 'e-'.$traceId,
             eventType: TraceEventType::TRACE_STARTED,
             traceId: $traceId,
-            timestamp: self::TIMESTAMP,
+            timestamp: '2026-03-24T12:00:00.000Z',
             source: 'test-service',
             payload: [],
         );
@@ -100,190 +264,65 @@ class CircuitBreakerTest extends TestCase
         return new RequestException('connection error', new Request('POST', '/api/v1/traces'));
     }
 
-    /** Read a property from AbstractHttpTransport (handles private visibility). */
-    private function getProp(HttpTransport $transport, string $name): mixed
+    public function test_sync_transport_drops_events_without_a_request_while_open(): void
     {
-        return $this->parentRef->getProperty($name)->getValue($transport);
+        [$transport, $history] = $this->syncTransport([$this->failure()]);
+
+        $transport->send($this->event('t1')); // fails, opens the breaker
+        $start = microtime(true);
+        $transport->send($this->event('t2'));
+        $transport->send($this->event('t3'));
+
+        $this->assertLessThan(0.05, microtime(true) - $start);
+        $this->assertCount(1, $history, 'no request while the breaker is open');
+        $this->assertSame(2, $transport->getStats()['dropped_breaker_open']);
+        $this->assertSame(CircuitBreaker::OPEN, $transport->getStats()['circuit']);
     }
 
-    /** Set a property on AbstractHttpTransport (handles private visibility). */
-    private function setProp(HttpTransport $transport, string $name, mixed $value): void
+    public function test_sync_transport_probe_success_closes_and_resumes(): void
     {
-        $this->parentRef->getProperty($name)->setValue($transport, $value);
-    }
-
-    /** Expire the circuit-breaker timeout so the next isCircuitOpen() call closes it. */
-    private function expireCircuit(HttpTransport $transport): void
-    {
-        $this->setProp($transport, 'circuitOpenUntil', (int)(microtime(true) * 1000) - 1);
-    }
-
-    // -------------------------------------------------------------------------
-    // Tests
-    // -------------------------------------------------------------------------
-
-    public function test_circuit_stays_closed_below_threshold(): void
-    {
-        // threshold=3, two failures — circuit must remain closed.
-        [$transport] = $this->makeTransport(
-            [$this->failure(), $this->failure()],
-            ['circuit_breaker_threshold' => 3],
-        );
-
-        $transport->send($this->makeEvent('t1', 'e1'));
-        $transport->send($this->makeEvent('t2', 'e2'));
-
-        $this->assertFalse(
-            $this->getProp($transport, 'circuitOpen'),
-            'Circuit must remain closed when failure count is below threshold',
-        );
-        $this->assertSame(2, $this->getProp($transport, 'failureCount'));
-    }
-
-    public function test_circuit_opens_after_threshold_failures(): void
-    {
-        // threshold=3, three failures — circuit must open.
-        [$transport] = $this->makeTransport(
-            [$this->failure(), $this->failure(), $this->failure()],
-            ['circuit_breaker_threshold' => 3],
-        );
-
-        $transport->send($this->makeEvent('t1', 'e1'));
-        $transport->send($this->makeEvent('t2', 'e2'));
-        $transport->send($this->makeEvent('t3', 'e3'));
-
-        $this->assertTrue(
-            $this->getProp($transport, 'circuitOpen'),
-            'Circuit must open once failure count reaches threshold',
-        );
-    }
-
-    public function test_events_queued_while_circuit_open(): void
-    {
-        // threshold=1 → one failure opens the circuit immediately.
-        [$transport] = $this->makeTransport(
-            [$this->failure()],   // only one mock response; no more HTTP calls expected
-            ['circuit_breaker_threshold' => 1],
-        );
-
-        // First send fails and opens the circuit.
-        $transport->send($this->makeEvent('t1', 'e1'));
-        $this->assertTrue($this->getProp($transport, 'circuitOpen'));
-
-        // These two must be queued, not sent (MockHandler has no more responses).
-        $transport->send($this->makeEvent('t2', 'e2'));
-        $transport->send($this->makeEvent('t3', 'e3'));
-
-        $queue = $this->getProp($transport, 'eventQueue');
-        $this->assertCount(2, $queue, 'Two events should be queued while circuit is open');
-    }
-
-    public function test_circuit_closes_after_timeout(): void
-    {
-        // Open the circuit with one failure (threshold=1).
-        [$transport] = $this->makeTransport(
-            [$this->failure(), new Response(201)],
-            ['circuit_breaker_threshold' => 1],
-        );
-
-        // Open the circuit.
-        $transport->send($this->makeEvent('t1', 'e1'));
-        $this->assertTrue($this->getProp($transport, 'circuitOpen'));
-
-        // Expire the timeout.
-        $this->expireCircuit($transport);
-
-        // The next send() calls isCircuitOpen(), which detects the expiry,
-        // closes the circuit (and drains any queue), then processes normally.
-        $transport->send($this->makeEvent('t2', 'e2'));
-
-        $this->assertFalse(
-            $this->getProp($transport, 'circuitOpen'),
-            'Circuit must close after timeout expires',
-        );
-    }
-
-    public function test_queue_drained_when_circuit_closes(): void
-    {
-        // Provide: 1 failure (opens circuit) + 2 successes (drain queued events).
-        [$transport, $history] = $this->makeTransport(
+        [$transport, $history] = $this->syncTransport(
             [$this->failure(), new Response(201), new Response(201)],
-            ['circuit_breaker_threshold' => 1],
+            ['circuit_breaker_timeout_ms' => 50],
         );
 
-        // Open the circuit.
-        $transport->send($this->makeEvent('t1', 'e1'));
+        $transport->send($this->event('t1'));
+        usleep(80_000);
+        $transport->send($this->event('t2')); // probe
+        $transport->send($this->event('t3'));
 
-        // Queue two events while open.
-        $transport->send($this->makeEvent('t2', 'e2'));
-        $transport->send($this->makeEvent('t3', 'e3'));
-
-        $this->assertCount(2, $this->getProp($transport, 'eventQueue'));
-
-        // Expire the circuit timeout.
-        $this->expireCircuit($transport);
-
-        // flush() calls drainQueue(), which calls isCircuitOpen() first.
-        // isCircuitOpen() sees the timeout expired, closes the circuit, then
-        // drainQueue processes each queued event.
-        $transport->flush();
-
-        $this->assertEmpty(
-            $this->getProp($transport, 'eventQueue'),
-            'Queue must be empty after circuit closes and drain runs',
-        );
-
-        // Total HTTP requests: 1 (failed) + 2 (drained).
-        $this->assertCount(3, $history->log, 'All three requests (1 fail + 2 drained) should have been made');
+        $this->assertCount(3, $history);
+        $this->assertSame(2, $transport->getStats()['delivered']);
+        $this->assertSame(CircuitBreaker::CLOSED, $transport->getStats()['circuit']);
     }
 
-    public function test_success_resets_failure_count(): void
+    public function test_sync_transport_probe_is_a_single_attempt(): void
     {
-        // threshold=3, two failures then one success — failureCount should reset to 0.
-        [$transport] = $this->makeTransport(
+        [$transport, $history] = $this->syncTransport(
             [$this->failure(), $this->failure(), new Response(201)],
-            ['circuit_breaker_threshold' => 3],
+            ['circuit_breaker_timeout_ms' => 50, 'max_retries' => 3],
         );
 
-        $transport->send($this->makeEvent('t1', 'e1'));
-        $transport->send($this->makeEvent('t2', 'e2'));
+        $transport->send($this->event('t1'));   // 1st attempt fails, breaker opens, no retry
+        usleep(80_000);
+        $transport->send($this->event('t2'));   // probe fails: no retries, re-opened
+        $transport->send($this->event('t3'));   // dropped
 
-        $this->assertSame(2, $this->getProp($transport, 'failureCount'));
-
-        $transport->send($this->makeEvent('t3', 'e3'));
-
-        $this->assertSame(
-            0,
-            $this->getProp($transport, 'failureCount'),
-            'failureCount must reset to 0 after a successful request',
-        );
-        $this->assertFalse($this->getProp($transport, 'circuitOpen'));
+        $this->assertCount(2, $history);
+        $this->assertSame(CircuitBreaker::OPEN, $transport->getStats()['circuit']);
+        $this->assertSame(1, $transport->getStats()['dropped_breaker_open']);
     }
 
-    public function test_flush_drains_queue_after_circuit_closes(): void
+    public function test_sync_transport_does_not_open_on_4xx(): void
     {
-        // 1 failure opens circuit; 2 successes consumed when flush drains the queue.
-        [$transport, $history] = $this->makeTransport(
-            [$this->failure(), new Response(201), new Response(201)],
-            ['circuit_breaker_threshold' => 1],
-        );
+        [$transport, $history] = $this->syncTransport([new Response(422), new Response(404), new Response(201)]);
 
-        // Open the circuit.
-        $transport->send($this->makeEvent('t1', 'e1'));
+        $transport->send($this->event('t1'));
+        $transport->send($this->event('t2'));
+        $transport->send($this->event('t3'));
 
-        // Queue two events.
-        $transport->send($this->makeEvent('t2', 'e2'));
-        $transport->send($this->makeEvent('t3', 'e3'));
-
-        $this->assertCount(2, $this->getProp($transport, 'eventQueue'));
-
-        // Expire the circuit so drainQueue can send.
-        $this->expireCircuit($transport);
-
-        $transport->flush();
-
-        $this->assertEmpty($this->getProp($transport, 'eventQueue'), 'Queue must be empty after flush');
-        // 3 total HTTP requests: 1 initial failure + 2 drained.
-        $this->assertCount(3, $history->log);
+        $this->assertCount(3, $history);
+        $this->assertSame(CircuitBreaker::CLOSED, $transport->getStats()['circuit']);
+        $this->assertSame(2, $transport->getStats()['rejected']);
     }
 }

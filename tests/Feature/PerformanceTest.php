@@ -23,6 +23,9 @@ class PerformanceTest extends TestCase
             'api_key' => getenv('TRACEFLOW_API_KEY') ?: null,
             'timeout' => 5.0,
             'max_retries' => 3,
+            // Retries happen inside flush(): keep them short so a missing
+            // local server does not spend each flush's whole time budget.
+            'retry_delay' => 100,
             'silent_errors' => true,
         ];
 

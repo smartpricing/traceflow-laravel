@@ -38,7 +38,7 @@ class TraceFlowMiddlewareTest extends TestCase
     }
 
     /**
-     * Create an SDK mock that, when startTrace() or getTrace() is called,
+     * Create an SDK mock that, when startTrace() or continueTrace() is called,
      * returns the provided $mockTrace.
      *
      * @return TraceFlowSDK&\PHPUnit\Framework\MockObject\MockObject
@@ -48,7 +48,7 @@ class TraceFlowMiddlewareTest extends TestCase
         $sdk = $this->createMock(TraceFlowSDK::class);
 
         $sdk->method('startTrace')->willReturn($mockTrace);
-        $sdk->method('getTrace')->willReturn($mockTrace);
+        $sdk->method('continueTrace')->willReturn($mockTrace);
 
         return $sdk;
     }
@@ -115,7 +115,8 @@ class TraceFlowMiddlewareTest extends TestCase
     }
 
     // -------------------------------------------------------------------------
-    // 2. X-Trace-Id header present → getTrace() called, startTrace() never called
+    // 2. X-Trace-Id header present → continueTrace() called (local, no network);
+    //    neither getTrace() (an HTTP read) nor startTrace() is called
     // -------------------------------------------------------------------------
 
     public function test_resumes_trace_when_trace_id_header_present(): void
@@ -124,7 +125,8 @@ class TraceFlowMiddlewareTest extends TestCase
         $mockTrace = $this->makeTrace($traceId);
         $mockSDK = $this->makeSDK($mockTrace);
 
-        $mockSDK->expects($this->once())->method('getTrace')->with($traceId)->willReturn($mockTrace);
+        $mockSDK->expects($this->once())->method('continueTrace')->with($traceId)->willReturn($mockTrace);
+        $mockSDK->expects($this->never())->method('getTrace');
         $mockSDK->expects($this->never())->method('startTrace');
 
         $request = Request::create('/test', 'GET', [], [], [], ['HTTP_X_TRACE_ID' => $traceId]);
@@ -246,7 +248,7 @@ class TraceFlowMiddlewareTest extends TestCase
     }
 
     // -------------------------------------------------------------------------
-    // 9. Middleware disabled → startTrace() and getTrace() never called
+    // 9. Middleware disabled → startTrace() and continueTrace() never called
     // -------------------------------------------------------------------------
 
     public function test_middleware_disabled_skips_tracing(): void
@@ -256,7 +258,7 @@ class TraceFlowMiddlewareTest extends TestCase
 
         $mockSDK = $this->createMock(TraceFlowSDK::class);
         $mockSDK->expects($this->never())->method('startTrace');
-        $mockSDK->expects($this->never())->method('getTrace');
+        $mockSDK->expects($this->never())->method('continueTrace');
 
         $request = Request::create('/test', 'GET');
         $middleware = $this->makeMiddleware($mockSDK);

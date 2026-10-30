@@ -43,13 +43,69 @@ return [
     */
     'endpoint' => env('TRACEFLOW_URL', 'http://localhost:3009'),
 
-    // Use async HTTP (non-blocking) for better performance
-    // Set to false to use synchronous HTTP (blocking)
+    // true (default): tracing calls never wait for the server; events are
+    // sent after the response, after each queue job and at shutdown.
+    // false: synchronous HTTP. Every tracing call BLOCKS until its request,
+    // retries included, is done. Use only where that is acceptable (scripts).
     'async_http' => env('TRACEFLOW_ASYNC_HTTP', true),
 
     'api_key' => env('TRACEFLOW_API_KEY'),
 
+    // Total timeout of one HTTP attempt (connect + response), in seconds.
     'timeout' => env('TRACEFLOW_TIMEOUT', 5.0),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Delivery (async HTTP transport)
+    |--------------------------------------------------------------------------
+    |
+    | Tracing calls only queue the event in memory and return. Queued events
+    | are sent when the app terminates (under PHP-FPM and Octane: after the
+    | response has been sent), after each queue job, and at shutdown.
+    |
+    | flush_timeout: longest wait of one of those flushes, in seconds. Under
+    | PHP-FPM it holds the worker (not the client) after every request, so
+    | keep it short. Events not delivered by then are dropped at the end of
+    | the request, or kept for the next flush in a queue worker.
+    |
+    | max_queue_size: events waiting for delivery; beyond it new events are
+    | dropped and counted.
+    |
+    | concurrency: requests in flight at once. A trace's create is sent before
+    | its steps and logs, a step's create before its update, and the trace's
+    | final update after them.
+    |
+    */
+    'flush_timeout' => env('TRACEFLOW_FLUSH_TIMEOUT', 2.0),
+
+    'max_queue_size' => env('TRACEFLOW_MAX_QUEUE_SIZE', 10000),
+
+    'concurrency' => env('TRACEFLOW_CONCURRENCY', 4),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Circuit Breaker
+    |--------------------------------------------------------------------------
+    |
+    | After `threshold` consecutive failed attempts (network error, timeout,
+    | 5xx, 429) no request is sent for `timeout_ms`, and trace events are
+    | dropped meanwhile. Then one request probes the server: success closes
+    | the breaker, failure re-opens it for another `timeout_ms`.
+    |
+    | The state is shared through the Laravel cache (`cache_store`, null =
+    | default store), so the failures of all requests and workers add up: a
+    | per-process breaker would never open under PHP-FPM. It is read about
+    | once per request and written only on failures and state changes. If the
+    | cache fails, the breaker falls back to per-process state. Set `shared`
+    | to false to keep the state per process.
+    |
+    */
+    'circuit_breaker' => [
+        'threshold' => env('TRACEFLOW_CIRCUIT_BREAKER_THRESHOLD', 5),
+        'timeout_ms' => env('TRACEFLOW_CIRCUIT_BREAKER_TIMEOUT_MS', 60000),
+        'shared' => env('TRACEFLOW_CIRCUIT_BREAKER_SHARED', true),
+        'cache_store' => env('TRACEFLOW_CIRCUIT_BREAKER_CACHE_STORE'),
+    ],
 
     /*
     |--------------------------------------------------------------------------
@@ -58,7 +114,9 @@ return [
     */
     'max_retries' => env('TRACEFLOW_MAX_RETRIES', 3),
 
-    'retry_delay' => env('TRACEFLOW_RETRY_DELAY', 1000), // milliseconds
+    // Initial retry delay in milliseconds, doubled per retry (with jitter, capped
+    // at 30 s). Async transport: retries happen inside a flush and its time budget.
+    'retry_delay' => env('TRACEFLOW_RETRY_DELAY', 1000),
 
     /*
     |--------------------------------------------------------------------------

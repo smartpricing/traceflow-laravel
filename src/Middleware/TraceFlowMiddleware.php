@@ -14,6 +14,10 @@ class TraceFlowMiddleware
 
     /**
      * Handle an incoming request.
+     *
+     * Nothing here waits for the Traceflow server: starting and closing the
+     * trace only queue events, which are sent after the response (see
+     * TraceFlowServiceProvider).
      */
     public function handle(Request $request, Closure $next): Response
     {
@@ -28,8 +32,8 @@ class TraceFlowMiddleware
 
         // Check if continuing existing trace
         if ($request->hasHeader($headerName)) {
-            // Retrieve existing trace
-            $trace = $this->sdk->getTrace($traceId);
+            // Continue the upstream trace locally: no network call in the request path.
+            $trace = $this->sdk->continueTrace($traceId);
         } else {
             // Start new trace
             $trace = $this->sdk->startTrace(

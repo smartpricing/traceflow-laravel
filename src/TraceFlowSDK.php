@@ -3,13 +3,16 @@
 namespace Smartness\TraceFlow;
 
 use GuzzleHttp\Client;
+use GuzzleHttp\Exception\RequestException;
 use Ramsey\Uuid\Uuid;
 use Smartness\TraceFlow\DTO\TraceEvent;
 use Smartness\TraceFlow\Enums\TraceEventType;
 use Smartness\TraceFlow\Handles\StepHandle;
 use Smartness\TraceFlow\Handles\TraceHandle;
 use Smartness\TraceFlow\Context\TraceFlowContext;
+use Smartness\TraceFlow\Transport\AbstractHttpTransport;
 use Smartness\TraceFlow\Transport\AsyncHttpTransport;
+use Smartness\TraceFlow\Transport\CircuitBreaker;
 use Smartness\TraceFlow\Transport\HttpTransport;
 use Smartness\TraceFlow\Transport\LogTransport;
 use Smartness\TraceFlow\Transport\NullTransport;
@@ -134,7 +137,6 @@ class TraceFlowSDK
             onClose: function () use ($traceId) {
                 unset($this->activeTraces[$traceId]);
             },
-            flushEvents: fn () => $this->transport->flush(),
         );
 
         $this->activeTraces[$traceId] = $handle;
@@ -143,39 +145,61 @@ class TraceFlowSDK
     }
 
     /**
-     * Get existing trace by ID (makes HTTP call)
+     * Continue a trace started elsewhere, e.g. by an upstream service that
+     * sent its ID in the X-Trace-Id header. No network call: sets the trace
+     * context and returns a handle for adding steps, logs and closing it.
+     */
+    public function continueTrace(string $traceId): TraceHandle
+    {
+        $traceId = self::ensureValidUuid($traceId, 'trace_id');
+        TraceFlowContext::set($traceId);
+
+        return $this->makeHandle($traceId);
+    }
+
+    /**
+     * Get existing trace by ID: reads its state from the server (blocking,
+     * at most `timeout` seconds) and sets the trace context if it answered.
+     *
+     * While the circuit breaker is open (or half-open) it returns at once
+     * without a request and without setting the context, as when the read
+     * fails with silent errors. Prefer continueTrace() when the state is
+     * not needed.
      */
     public function getTrace(string $traceId): TraceHandle
     {
         $traceId = self::ensureValidUuid($traceId, 'trace_id');
 
+        if (! $this->transport instanceof AbstractHttpTransport) {
+            return $this->makeHandle($traceId);
+        }
+
         if (! $this->endpoint) {
             error_log('[TraceFlow] getTrace() requires HTTP transport with endpoint');
 
-            return new TraceHandle(
-                traceId: $traceId,
-                source: $this->source,
-                sendEvent: $this->sendEvent(...),
-                flushEvents: fn () => $this->transport->flush(),
-            );
+            return $this->makeHandle($traceId);
+        }
+
+        $breaker = $this->transport->circuitBreaker();
+
+        if ($breaker->state() !== CircuitBreaker::CLOSED) {
+            return $this->makeHandle($traceId);
         }
 
         try {
             $this->makeHttpClient()->get("/api/v1/traces/{$traceId}/state");
+            $breaker->recordSuccess();
             TraceFlowContext::set($traceId);
         } catch (\Exception $e) {
+            $this->recordReadFailure($breaker, $e);
+
             if (! $this->silentErrors) {
                 throw $e;
             }
             error_log("[TraceFlow] Error getting trace (silenced): {$e->getMessage()}");
         }
 
-        return new TraceHandle(
-            traceId: $traceId,
-            source: $this->source,
-            sendEvent: $this->sendEvent(...),
-            flushEvents: fn () => $this->transport->flush(),
-        );
+        return $this->makeHandle($traceId);
     }
 
     /**
@@ -189,11 +213,7 @@ class TraceFlowSDK
             return null;
         }
 
-        return new TraceHandle(
-            traceId: $traceId,
-            source: $this->source,
-            sendEvent: $this->sendEvent(...),
-        );
+        return $this->makeHandle($traceId);
     }
 
     /**
@@ -215,7 +235,8 @@ class TraceFlowSDK
     }
 
     /**
-     * Send heartbeat for trace
+     * Send heartbeat for trace (blocking, at most `timeout` seconds; skipped
+     * while the circuit breaker is not closed)
      */
     public function heartbeat(?string $traceId = null): void
     {
@@ -223,13 +244,23 @@ class TraceFlowSDK
             ? self::ensureValidUuid($traceId, 'trace_id')
             : TraceFlowContext::currentTraceId();
 
-        if (! $targetTraceId || ! $this->endpoint) {
+        if (! $targetTraceId || ! $this->endpoint || ! $this->transport instanceof AbstractHttpTransport) {
+            return;
+        }
+
+        // Skipped while the breaker is open or half-open: never wait for a server considered down.
+        $breaker = $this->transport->circuitBreaker();
+
+        if ($breaker->state() !== CircuitBreaker::CLOSED) {
             return;
         }
 
         try {
             $this->makeHttpClient()->post("/api/v1/traces/{$targetTraceId}/heartbeat");
+            $breaker->recordSuccess();
         } catch (\Exception $e) {
+            $this->recordReadFailure($breaker, $e);
+
             if ($this->silentErrors) {
                 error_log("[TraceFlow] Heartbeat error: {$e->getMessage()}");
             } else {
@@ -279,7 +310,12 @@ class TraceFlowSDK
     }
 
     /**
-     * Flush pending events
+     * Deliver pending events, waiting at most `flush_timeout` seconds.
+     *
+     * The Laravel integration calls this after the response has been sent and
+     * after each queue job, so application code rarely needs to. With
+     * silent_errors=false it throws a DeliveryException if events were not
+     * delivered since the previous flush.
      */
     public function flush(): void
     {
@@ -287,7 +323,20 @@ class TraceFlowSDK
     }
 
     /**
-     * Shutdown SDK — close all active handles, then flush transport.
+     * Delivery counters of the HTTP transports (delivered, failed, rejected,
+     * dropped_* per reason, queued, in_flight, circuit state); empty for the
+     * other transports.
+     *
+     * @return array<string, int|string>
+     */
+    public function getStats(): array
+    {
+        return $this->transport instanceof AbstractHttpTransport ? $this->transport->getStats() : [];
+    }
+
+    /**
+     * Shutdown SDK — close all active handles, then flush the transport within
+     * `flush_timeout` and drop (and log) what is still undelivered.
      */
     public function shutdown(): void
     {
@@ -322,6 +371,28 @@ class TraceFlowSDK
             } else {
                 throw $e;
             }
+        }
+    }
+
+    private function makeHandle(string $traceId): TraceHandle
+    {
+        return new TraceHandle(
+            traceId: $traceId,
+            source: $this->source,
+            sendEvent: $this->sendEvent(...),
+        );
+    }
+
+    /**
+     * Network errors, timeouts, 5xx and 429 of a direct read count toward the
+     * circuit breaker; a 404 (unknown trace) does not.
+     */
+    private function recordReadFailure(CircuitBreaker $breaker, \Throwable $e): void
+    {
+        $status = $e instanceof RequestException && $e->hasResponse() ? $e->getResponse()->getStatusCode() : null;
+
+        if ($status === null || $status >= 500 || $status === 429) {
+            $breaker->recordFailure();
         }
     }
 

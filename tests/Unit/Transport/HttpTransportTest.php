@@ -288,65 +288,56 @@ class HttpTransportTest extends TestCase
     }
 
     // -------------------------------------------------------------------------
-    // Flush / shutdown — tests rely on circuit-breaker to populate the queue
+    // Flush / shutdown: the synchronous transport buffers nothing (events are
+    // sent by send(), or dropped while the breaker is open: see CircuitBreakerTest)
     // -------------------------------------------------------------------------
 
-    /**
-     * Helper: open the circuit breaker and queue two events, then expire the
-     * circuit timeout so flush()/shutdown() will drain the queue.
-     *
-     * Returns [$transport, $history, $queueProp].
-     */
-    private function prepareQueuedTransport(array $extraResponses = []): array
+    public function test_flush_and_shutdown_send_nothing_more(): void
     {
-        $failure = new RequestException('err', new Request('POST', '/api/v1/traces'));
+        [$transport, $history] = $this->makeTransport([new Response(201)]);
 
-        [$transport, $history] = $this->makeTransport(
-            array_merge([$failure], $extraResponses),
-            [
-                'max_retries'               => 0,
-                'retry_delay'               => 0,
-                'silent_errors'             => true,
-                'circuit_breaker_threshold' => 1,
-            ],
-        );
-
-        // First send fails, which opens the circuit (threshold=1).
-        $transport->send($this->makeEvent(TraceEventType::TRACE_STARTED, 'trace-1', [], null, 'e1'));
-
-        // Next two are queued because the circuit is open.
-        $transport->send($this->makeEvent(TraceEventType::TRACE_STARTED, 'trace-2', [], null, 'e2'));
-        $transport->send($this->makeEvent(TraceEventType::TRACE_STARTED, 'trace-3', [], null, 'e3'));
-
-        // Expire the circuit so drainQueue() will send events on the next call.
-        $parentRef = new \ReflectionClass(\Smartness\TraceFlow\Transport\AbstractHttpTransport::class);
-        $parentRef->getProperty('circuitOpenUntil')->setValue($transport, (int)(microtime(true) * 1000) - 1);
-
-        $queueProp = $parentRef->getProperty('eventQueue');
-
-        return [$transport, $history, $queueProp];
-    }
-
-    public function test_flush_drains_event_queue(): void
-    {
-        [$transport, , $queueProp] = $this->prepareQueuedTransport([new Response(201), new Response(201)]);
-
-        $this->assertCount(2, $queueProp->getValue($transport), 'Two events should be queued before flush');
-
+        $transport->send($this->makeEvent(TraceEventType::TRACE_STARTED));
         $transport->flush();
-
-        $this->assertEmpty($queueProp->getValue($transport), 'Queue should be empty after flush()');
-    }
-
-    public function test_shutdown_calls_drain_queue(): void
-    {
-        [$transport, , $queueProp] = $this->prepareQueuedTransport([new Response(201), new Response(201)]);
-
-        $this->assertCount(2, $queueProp->getValue($transport), 'Two events should be queued before shutdown');
-
         $transport->shutdown();
 
-        $this->assertEmpty($queueProp->getValue($transport), 'Queue should be empty after shutdown()');
+        $this->assertCount(1, $history->log);
+    }
+
+    public function test_retries_wait_with_backoff(): void
+    {
+        $failure = new RequestException('timeout', new Request('POST', '/api/v1/traces'));
+        $times = [];
+        $record = function ($response) use (&$times) {
+            return function () use ($response, &$times) {
+                $times[] = microtime(true);
+
+                return $response; // MockHandler turns a Throwable into a rejection
+            };
+        };
+
+        [$transport] = $this->makeTransport(
+            [$record($failure), $record($failure), $record(new Response(201))],
+            ['max_retries' => 3, 'retry_delay' => 40],
+        );
+
+        $transport->send($this->makeEvent(TraceEventType::TRACE_STARTED));
+
+        $this->assertCount(3, $times);
+        // Delays: 40 ms then 80 ms, each with jitter between half and all of it.
+        $this->assertGreaterThanOrEqual(0.019, $times[1] - $times[0]);
+        $this->assertGreaterThanOrEqual(0.039, $times[2] - $times[1]);
+    }
+
+    public function test_429_is_retried(): void
+    {
+        [$transport, $history] = $this->makeTransport(
+            [new Response(429), new Response(201)],
+            ['max_retries' => 1, 'retry_delay' => 0],
+        );
+
+        $transport->send($this->makeEvent(TraceEventType::TRACE_STARTED));
+
+        $this->assertCount(2, $history->log);
     }
 
     // -------------------------------------------------------------------------

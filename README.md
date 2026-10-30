@@ -232,31 +232,120 @@ $trace->finish(result: ['quote_id' => '12345']);
 ```
 
 Use `fail($error)` on a trace or step to record a failure. Explicit trace IDs must
-be UUIDs; omit them to generate one. `getTrace($traceId)` reads live state over
-HTTP, and `heartbeat($traceId)` refreshes activity. With silent errors enabled,
-a returned handle does not prove that the backend accepted or found a trace.
+be UUIDs; omit them to generate one. A returned handle does not prove that the
+backend accepted a trace: these calls never wait for the server (see
+[Delivery](#delivery)).
+
+`continueTrace($traceId)` continues a trace started by another service, without
+a network call. `getTrace($traceId)` also reads the trace's live state over HTTP and
+`heartbeat($traceId)` refreshes its activity: both wait for the server, at most
+`TRACEFLOW_TIMEOUT` seconds, and return at once without a request while the
+circuit breaker is open.
 
 Register [TraceFlowMiddleware](src/Middleware/TraceFlowMiddleware.php) in the
 application's middleware configuration to trace HTTP requests. It reads
-`X-Trace-Id`, stores the handle in request attribute `trace`, finishes or fails
-the trace after the response, and clears context.
+`X-Trace-Id` (continuing that trace locally, with no request to the backend),
+stores the handle in request attribute `trace`, finishes or fails the trace once
+the response is built, and clears context. Nothing in the middleware waits for the
+Traceflow server.
 
 For queue propagation, [TracedJob](src/Queue/TracedJob.php) captures the current
 trace when `initializeTracedJob()` is called in the job constructor. Its middleware
 restores and clears that context. Merge this middleware if the job already defines
 its own middleware. This propagates trace context, not `AuditContext`.
 
+## Delivery
+
+Tracing never makes the application wait for the Traceflow server, whatever its
+state (slow, hanging, answering errors or down). With the default async HTTP
+transport, `startTrace`, `startStep`, `log`, `finish` and `fail` only put the event
+in an in-memory queue, in well under a millisecond and without any network or
+cache access.
+
+The queued events are sent:
+
+- when the application terminates: under PHP-FPM and Octane that is **after the
+  response has been sent** (Laravel's `terminating` callbacks; Symfony's
+  `Response::send()` calls `fastcgi_finish_request()`), so the client never waits.
+  Under Apache mod_php, which has no `fastcgi_finish_request()`, the connection may
+  stay open until then. Traces left open are failed first;
+- after each queue job (`JobProcessed`, `JobExceptionOccurred`, `JobFailed`), since a
+  worker never terminates between jobs. Sync and deferred jobs run inside the
+  request and are not flushed separately;
+- from a shutdown function, after `exit()` or a fatal error;
+- when you call `TraceFlow::flush()`, e.g. in a long-running command or daemon that
+  never terminates between units of work.
+
+Each flush waits at most `TRACEFLOW_FLUSH_TIMEOUT` seconds (default `2`). Under
+PHP-FPM that time holds the worker, not the client, so keep it short. Within it,
+requests run at most `TRACEFLOW_CONCURRENCY` at a time (default `4`) and failed
+attempts are retried with exponential backoff and jitter. A trace's create goes
+before its steps and logs, a step's create before its update, and a trace's final
+update after everything sent before it for that trace.
+
+What is dropped (and counted in `TraceFlow::getStats()`):
+
+| Case | What happens |
+| --- | --- |
+| More than `TRACEFLOW_MAX_QUEUE_SIZE` events waiting (default `10000`) | New events are dropped. |
+| Network error, timeout, 5xx or 429 | Retried up to `TRACEFLOW_MAX_RETRIES` times, then dropped. |
+| Other 4xx | Dropped at once, not retried; does not count toward the breaker. |
+| 409 | Counts as delivered (the trace or step already exists). |
+| Not delivered when the flush time is up | Dropped at the end of the request; kept for the next flush in queue workers. |
+| Circuit breaker open | Dropped without a request. |
+
+Drops are logged with `error_log()` at most once per 10 seconds per process, with the
+counts since the previous warning. During an outage the breaker logs when it opens
+and re-opens instead, so a PHP-FPM application does not log one line per request.
+
+**Circuit breaker.** After `TRACEFLOW_CIRCUIT_BREAKER_THRESHOLD` consecutive failed
+attempts (default `5`; network errors, timeouts, the flush time running out, 5xx, 429)
+no request is sent for `TRACEFLOW_CIRCUIT_BREAKER_TIMEOUT_MS` (default `60000`).
+Then a single request, in a single process, probes the server: success closes the
+breaker, failure re-opens it for the full timeout at once. Under PHP-FPM every
+request starts from scratch, so the breaker state is kept in the Laravel cache
+(`TRACEFLOW_CIRCUIT_BREAKER_CACHE_STORE`, default store when empty) and shared by
+all requests and workers using it. It is read about once per request, after the
+response, and written only on failures and state changes. Use a fast store shared
+by the workers, such as Redis (the `array` store lasts one request under PHP-FPM).
+If the cache fails, the breaker falls back to per-process state. Set
+`TRACEFLOW_CIRCUIT_BREAKER_SHARED=false` to keep it per process.
+
+An outage therefore costs each PHP-FPM worker at most one flush timeout per
+request, only until the breaker opens, then one probe per breaker timeout across all
+processes.
+
+**Errors.** Tracing calls never throw delivery errors. With
+`TRACEFLOW_SILENT_ERRORS=false`, `TraceFlow::flush()` and `shutdown()` throw a
+`DeliveryException` listing the events not delivered since the previous flush,
+which keeps that setting useful in tests and scripts. The automatic flushes catch it
+and log it instead.
+
+**Synchronous transport.** `TRACEFLOW_ASYNC_HTTP=false` sends each event from the
+tracing call itself and **blocks** it until the request, retries and backoff
+included, is done: up to `(max_retries + 1) x timeout` plus the delays per call when
+the server hangs. It honours the shared breaker (events are dropped at once while it
+is open) and throws delivery errors from the tracing call when silent errors are
+off. Use it only where blocking is acceptable.
+
 ## Delivery settings
 
 | Setting | Behaviour |
 | --- | --- |
 | `TRACEFLOW_TRANSPORT=http` | Trace events use HTTP; `log` writes to Laravel's log channel. Kafka is not implemented in the PHP SDK. |
-| `TRACEFLOW_ASYNC_HTTP=true` | Default for tracing. Pending requests are flushed during shutdown; abrupt termination can lose them. |
+| `TRACEFLOW_ASYNC_HTTP=true` | Default: tracing calls never wait; events are sent after the response, after each job and at shutdown. `false` blocks every tracing call. |
 | `TRACEFLOW_SILENT_ERRORS=true` | Default for tracing delivery failures. Configuration and input errors can still throw. |
 | `TRACEFLOW_ENABLED=false` | Drops trace events and audit events. Audit envelopes are still validated. |
-| `TRACEFLOW_TIMEOUT` | HTTP timeout in seconds; default `5`. |
+| `TRACEFLOW_TIMEOUT` | Total timeout of one HTTP attempt (connect + response), in seconds; default `5`. |
 | `TRACEFLOW_MAX_RETRIES` | Default `3`. |
-| `TRACEFLOW_RETRY_DELAY` | Initial retry delay in milliseconds; default `1000`. |
+| `TRACEFLOW_RETRY_DELAY` | Initial retry delay in milliseconds, doubled per retry with jitter, capped at 30 s; default `1000`. |
+| `TRACEFLOW_FLUSH_TIMEOUT` | Longest wait of one flush, in seconds; default `2`. |
+| `TRACEFLOW_MAX_QUEUE_SIZE` | Events waiting for delivery before new ones are dropped; default `10000`. |
+| `TRACEFLOW_CONCURRENCY` | Requests in flight at once during a flush; default `4`. |
+| `TRACEFLOW_CIRCUIT_BREAKER_THRESHOLD` | Consecutive failed attempts that open the breaker; default `5`. |
+| `TRACEFLOW_CIRCUIT_BREAKER_TIMEOUT_MS` | How long the breaker stays open before a probe; default `60000`. |
+| `TRACEFLOW_CIRCUIT_BREAKER_CACHE_STORE` | Laravel cache store holding the breaker state; empty = default store. |
+| `TRACEFLOW_CIRCUIT_BREAKER_SHARED` | `false` keeps the breaker state per process; default `true`. |
 
 Audit events always go through Queen, regardless of the tracing transport,
 `async_http` or `silent_errors`.
@@ -264,6 +353,22 @@ Audit events always go through Queen, regardless of the tracing transport,
 For local trace logs, set `TRACEFLOW_TRANSPORT=log` and choose
 `TRACEFLOW_LOG_CHANNEL` / `TRACEFLOW_LOG_LEVEL`. These settings do not redirect
 audit events to a log file.
+
+## Upgrading to 2.13
+
+- Tracing calls and `TraceFlowMiddleware` no longer wait for Traceflow. Events are
+  sent after the response, after each queue job and at shutdown, each flush waiting at
+  most `TRACEFLOW_FLUSH_TIMEOUT` (2 s). Before, `$trace->finish()` waited for every
+  request of the trace, inside the request.
+- The circuit breaker state now lives in the Laravel cache, so it opens across PHP-FPM
+  requests. Set `TRACEFLOW_CIRCUIT_BREAKER_CACHE_STORE` if the default store is slow
+  or shared with something it should not be.
+- A request with `X-Trace-Id` continues that trace without calling Traceflow
+  (`continueTrace()`); `getTrace()` still reads the remote state for explicit callers.
+- With `TRACEFLOW_SILENT_ERRORS=false`, the async transport reports delivery failures
+  from `flush()`/`shutdown()` (`DeliveryException`), not from the tracing calls.
+- During an outage, events are dropped (queue full, retries spent, flush deadline)
+  instead of slowing the application down.
 
 ## Development
 
@@ -276,6 +381,11 @@ composer test:feature
 composer analyse
 composer format:check
 ```
+
+The delivery tests (`tests/Feature/NonBlockingDeliveryTest.php`,
+`tests/Feature/LaravelDeliveryTest.php`) start throwaway servers on 127.0.0.1 with
+`php -S` (and a socket that never answers) to check that tracing never waits for a
+hanging, failing or unreachable server.
 
 Run the audit tests without an application database:
 

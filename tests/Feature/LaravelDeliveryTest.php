@@ -3,6 +3,7 @@
 namespace Smartness\TraceFlow\Tests\Feature;
 
 use Illuminate\Contracts\Queue\Job;
+use Illuminate\Foundation\Application;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
 use Illuminate\Queue\Events\JobExceptionOccurred;
@@ -194,6 +195,57 @@ class LaravelDeliveryTest extends TestCase
         $this->sdk()->startTrace(title: 'failing job')->fail('boom');
         $events->dispatch(new JobExceptionOccurred('redis', $this->createStub(Job::class), new \RuntimeException('boom')));
         $this->assertSame(4, $this->server->requestCount());
+    }
+
+    public function test_a_console_command_sends_events_while_it_runs(): void
+    {
+        $this->useServer(LocalServer::start());
+        config(['traceflow.flush_interval' => 0.05]);
+
+        $this->sdk()->startTrace(title: 'account 1')->finish();
+        $this->assertSame(0, $this->server->requestCount(), 'fresh events wait for the interval');
+
+        usleep(60_000);
+        $this->sdk()->startTrace(title: 'account 2')->finish();
+
+        $this->assertGreaterThanOrEqual(2, $this->server->requestCount(), 'events older than flush_interval are sent during the command');
+    }
+
+    public function test_a_long_console_command_loses_no_event_at_its_end(): void
+    {
+        // The scheduled import that lost traces in production: one command, hundreds
+        // of traces, more events than the terminate flush can send in flush_timeout.
+        // Jitter (0-15 ms per answer) stands for the network: on loopback, a fast
+        // machine would send them all in one flush and hide the loss.
+        $this->useServer(LocalServer::start('jitter'));
+
+        foreach (range(1, 300) as $account) {
+            $trace = $this->sdk()->startTrace(title: "import {$account}");
+            $trace->startStep(name: 'pull bookings')->finish();
+            $trace->finish();
+        }
+        $this->terminate();
+
+        // A request retried after a flush deadline may arrive twice: count distinct trace ends.
+        $ends = array_filter($this->server->requests(), fn ($r) => $r['method'] === 'PATCH' && str_starts_with($r['path'], '/api/v1/traces/'));
+        $this->assertCount(300, array_unique(array_column($ends, 'path')), 'every trace end arrives');
+        $stats = $this->sdk()->getStats();
+        $this->assertSame([0, 0, 0], [$stats['dropped_flush_timeout'], $stats['dropped_breaker_open'], $stats['failed']]);
+    }
+
+    public function test_http_requests_send_nothing_before_terminate(): void
+    {
+        (new \ReflectionProperty(Application::class, 'isRunningInConsole'))->setValue($this->app, false);
+        $this->useServer(LocalServer::start());
+        config(['traceflow.flush_interval' => 0.01]);
+
+        foreach (range(1, 60) as $_) {
+            $this->sdk()->startTrace(title: 'request')->finish();
+        }
+        usleep(20_000);
+        $this->sdk()->startTrace(title: 'request')->finish();
+
+        $this->assertSame(0, $this->server->requestCount(), 'under PHP-FPM and Octane the request never waits');
     }
 
     public function test_config_options_reach_the_transport(): void

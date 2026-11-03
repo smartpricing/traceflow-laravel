@@ -16,7 +16,9 @@ use Smartness\TraceFlow\DTO\TraceEvent;
  * send() only maps the event to a request and appends it to a bounded
  * in-memory queue (no I/O). Requests are sent by flush(), which the Laravel
  * integration calls after the response has been sent (app terminating), after
- * each queue job and at shutdown. flush() drives the requests on a curl multi
+ * each queue job and at shutdown. With flush_interval (console processes,
+ * where no client waits) send() also delivers once the oldest queued event
+ * is that old or FLUSH_BATCH events wait. flush() drives the requests on a curl multi
  * handle with a hard deadline (flush_timeout), so an unreachable or hanging
  * server costs at most that long per flush, and the shared circuit breaker
  * soon stops even that.
@@ -36,9 +38,19 @@ class AsyncHttpTransport extends AbstractHttpTransport
 
     private const IN_FLIGHT = 1;
 
+    /** With flush_interval: events queued before send() delivers them, so each delivery stays well within flush_timeout. */
+    private const FLUSH_BATCH = 100;
+
     private ?CurlMultiHandler $multiHandler = null;
 
     private float $flushTimeout;
+
+    /** Seconds the oldest queued event may wait before send() delivers; 0 = only flush() and shutdown() deliver. */
+    private float $flushInterval;
+
+    private float $flushDueAt = 0.0;
+
+    private int $flushDueCount = self::FLUSH_BATCH;
 
     private int $maxQueueSize;
 
@@ -71,6 +83,7 @@ class AsyncHttpTransport extends AbstractHttpTransport
         }
 
         $this->flushTimeout = max(0.0, (float) ($config['flush_timeout'] ?? 2.0));
+        $this->flushInterval = max(0.0, (float) ($config['flush_interval'] ?? 0.0));
         $this->maxQueueSize = max(1, (int) ($config['max_queue_size'] ?? 10000));
         $this->concurrency = max(1, (int) ($config['concurrency'] ?? 4));
 
@@ -102,7 +115,8 @@ class AsyncHttpTransport extends AbstractHttpTransport
     }
 
     /**
-     * Queue the event. No network I/O and no cache access happen here.
+     * Queue the event. No network I/O and no cache access happen here, unless
+     * flush_interval is set and the queue is due (sendIfDue()).
      */
     public function send(TraceEvent $event): void
     {
@@ -126,12 +140,47 @@ class AsyncHttpTransport extends AbstractHttpTransport
             return;
         }
 
+        $wasEmpty = $this->items === [];
+
         $this->items[++$this->sequence] = $request + [
             'state' => self::QUEUED,
             'attempts' => 0,
             'next_at' => 0.0,
             'token' => 0,
         ];
+
+        if ($this->flushInterval > 0) {
+            $this->sendIfDue($wasEmpty);
+        }
+    }
+
+    /**
+     * A console process (artisan command, scheduler, queue worker) has no
+     * client waiting, and otherwise sends only when it ends: a long command
+     * then runs out of flush_timeout and drops the rest. So deliver once the
+     * oldest queued event is flush_interval old, or FLUSH_BATCH events wait.
+     * What is not delivered stays queued; failures are reported by the next
+     * flush(), never thrown from here.
+     */
+    private function sendIfDue(bool $wasEmpty): void
+    {
+        $now = microtime(true);
+
+        if ($wasEmpty) {
+            $this->flushDueAt = $now + $this->flushInterval;
+            $this->flushDueCount = self::FLUSH_BATCH;
+        }
+
+        if ($now < $this->flushDueAt && count($this->items) < $this->flushDueCount) {
+            return;
+        }
+
+        $this->deliver($now + $this->flushTimeout);
+        // Leftovers (slow or hanging server) wait for the next interval or batch: at most
+        // one flush_timeout per interval or batch, until the breaker opens.
+        $this->flushDueAt = microtime(true) + $this->flushInterval;
+        $this->flushDueCount = count($this->items) + self::FLUSH_BATCH;
+        $this->warnUndelivered();
     }
 
     /**

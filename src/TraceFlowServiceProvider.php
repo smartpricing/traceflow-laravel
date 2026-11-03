@@ -45,6 +45,8 @@ class TraceFlowServiceProvider extends ServiceProvider
                 'max_retries' => config('traceflow.max_retries'),
                 'retry_delay' => config('traceflow.retry_delay'),
                 'flush_timeout' => config('traceflow.flush_timeout'),
+                // Console only: under PHP-FPM and Octane (APP_RUNNING_IN_CONSOLE=false) a request never waits.
+                'flush_interval' => $app->runningInConsole() ? config('traceflow.flush_interval') : 0,
                 'max_queue_size' => config('traceflow.max_queue_size'),
                 'concurrency' => config('traceflow.concurrency'),
                 'silent_errors' => config('traceflow.silent_errors'),
@@ -85,6 +87,8 @@ class TraceFlowServiceProvider extends ServiceProvider
         //   left open, flushes, and drops what is still undelivered.
         // - after each queue job, because a worker never terminates between jobs.
         // - register_shutdown_function(): exit(), fatal errors and other abrupt ends.
+        // - in console processes, also while they run (traceflow.flush_interval):
+        //   a long command would otherwise drop what its last flush cannot send.
         $this->app->terminating(function () {
             $this->runSdk(fn (TraceFlowSDK $sdk) => $sdk->shutdown());
         });

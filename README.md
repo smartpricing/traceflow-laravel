@@ -273,6 +273,11 @@ The queued events are sent:
   worker never terminates between jobs. Sync and deferred jobs run inside the
   request and are not flushed separately;
 - from a shutdown function, after `exit()` or a fatal error;
+- in console processes (artisan commands, the scheduler, queue workers), also while
+  they run: once the oldest queued event is `TRACEFLOW_FLUSH_INTERVAL` seconds old
+  (default `1`) or 100 events wait. No client waits there, and a long command would
+  otherwise send everything at its end and drop what does not fit in one flush.
+  HTTP requests (PHP-FPM, Octane) never send before the response;
 - when you call `TraceFlow::flush()`, e.g. in a long-running command or daemon that
   never terminates between units of work.
 
@@ -340,6 +345,7 @@ off. Use it only where blocking is acceptable.
 | `TRACEFLOW_MAX_RETRIES` | Default `3`. |
 | `TRACEFLOW_RETRY_DELAY` | Initial retry delay in milliseconds, doubled per retry with jitter, capped at 30 s; default `1000`. |
 | `TRACEFLOW_FLUSH_TIMEOUT` | Longest wait of one flush, in seconds; default `2`. |
+| `TRACEFLOW_FLUSH_INTERVAL` | Console processes only: send queued events once the oldest is this old, in seconds; default `1`, `0` sends only at the end. |
 | `TRACEFLOW_MAX_QUEUE_SIZE` | Events waiting for delivery before new ones are dropped; default `10000`. |
 | `TRACEFLOW_CONCURRENCY` | Requests in flight at once during a flush; default `4`. |
 | `TRACEFLOW_CIRCUIT_BREAKER_THRESHOLD` | Consecutive failed attempts that open the breaker; default `5`. |
@@ -353,6 +359,15 @@ Audit events always go through Queen, regardless of the tracing transport,
 For local trace logs, set `TRACEFLOW_TRANSPORT=log` and choose
 `TRACEFLOW_LOG_CHANNEL` / `TRACEFLOW_LOG_LEVEL`. These settings do not redirect
 audit events to a log file.
+
+## Upgrading to 2.13.1
+
+- Console processes send trace events while they run (`TRACEFLOW_FLUSH_INTERVAL`).
+  In 2.13.0 an artisan command sent everything at its end, within one
+  `TRACEFLOW_FLUSH_TIMEOUT`, and dropped the rest: a scheduled command with hundreds
+  of traces lost whole traces, and traces whose final update was dropped read as
+  `Trace timeout - no activity detected`. A command now waits for delivery in small
+  batches while it runs. HTTP requests are unchanged.
 
 ## Upgrading to 2.13
 

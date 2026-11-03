@@ -68,6 +68,12 @@ return [
     | keep it short. Events not delivered by then are dropped at the end of
     | the request, or kept for the next flush in a queue worker.
     |
+    | flush_interval: in console processes (artisan commands, the scheduler,
+    | queue workers), queued events are also sent while the process runs,
+    | once the oldest is this many seconds old or 100 are waiting. Without it
+    | a long command sends everything at its end and drops what does not fit
+    | in flush_timeout. 0 disables. HTTP requests never send before the end.
+    |
     | max_queue_size: events waiting for delivery; beyond it new events are
     | dropped and counted.
     |
@@ -77,6 +83,8 @@ return [
     |
     */
     'flush_timeout' => env('TRACEFLOW_FLUSH_TIMEOUT', 2.0),
+
+    'flush_interval' => env('TRACEFLOW_FLUSH_INTERVAL', 1.0),
 
     'max_queue_size' => env('TRACEFLOW_MAX_QUEUE_SIZE', 10000),
 
